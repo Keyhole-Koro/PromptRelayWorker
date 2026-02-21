@@ -26,17 +26,9 @@ export type Genome = {
 };
 
 export type ScoreBreakdown = {
-  readability: number;
-  twist: number;
-  aesthetic: number;
-  fitness: number;
-  labels: {
-    scene?: string;
-    subject?: string;
-    action?: string;
-  };
+  cosine: number;
+  score01: number;
   flags: string[];
-  short_reason: string;
 };
 
 export type PoolItemMeta = {

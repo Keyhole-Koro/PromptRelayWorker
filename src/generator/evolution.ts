@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import { config } from "../config/app-config.js";
 import { log } from "../observability/logger.js";
-import { computeFitness } from "../scorer/fitness.js";
 import { evaluateWithGeminiInline } from "../scorer/vertex-gemini-scorer.js";
 import type { AspectRatio, EvolveBudget, Genome, PoolItemMeta, ScoreBreakdown } from "../domain/types.js";
 import { mapLimit } from "../shared/utils.js";
@@ -136,31 +135,25 @@ export async function evolveOneItem(params: {
         imageBase64,
         mimeType: "image/png",
         prompt,
-        genome,
         runId: params.runId,
         generation,
         candidateIndex: i,
       });
-      if (scores.readability < 0.65) {
-        scores.flags = [...scores.flags, "filtered_readability_lt_0_65"];
-      }
       log("info", "candidate_scored", {
         runId: params.runId,
         itemId: params.itemId,
         generation,
         candidateIndex: i,
-        fitness: scores.fitness,
-        readability: scores.readability,
-        filtered: scores.readability < 0.65,
+        score01: scores.score01,
+        cosine: scores.cosine,
       });
       return { genome, prompt, imageBase64, tempImagePath, scores, generation } satisfies Candidate;
     });
 
-    const viable = candidates.filter((c) => c.scores.readability >= 0.65);
-    const ranked = [...(viable.length > 0 ? viable : candidates)].sort((a, b) => b.scores.fitness - a.scores.fitness);
+    const ranked = [...candidates].sort((a, b) => b.scores.score01 - a.scores.score01);
     const generationBest = ranked[0];
 
-    if (!bestOverall || generationBest.scores.fitness > bestOverall.scores.fitness) {
+    if (!bestOverall || generationBest.scores.score01 > bestOverall.scores.score01) {
       bestOverall = generationBest;
     }
 
@@ -185,14 +178,7 @@ export async function evolveOneItem(params: {
     aspectRatio: params.aspectRatio,
     prompt: bestOverall.prompt,
     genome: bestOverall.genome,
-    scores: {
-      ...bestOverall.scores,
-      fitness: computeFitness(
-        bestOverall.scores.readability,
-        bestOverall.scores.twist,
-        bestOverall.scores.aesthetic,
-      ),
-    },
+    scores: bestOverall.scores,
     generation: bestOverall.generation,
     tempImagePath: bestOverall.tempImagePath,
   };

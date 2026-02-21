@@ -23,6 +23,7 @@ const ConfigSchema = z.object({
   MAX_MOVE_RETRIES: z.number().int().positive(),
   MAX_VERTEX_RETRIES: z.number().int().positive(),
   GEMINI_MODEL: z.string().min(1),
+  MULTIMODAL_EMBEDDING_MODEL: z.string().min(1),
   IMAGEN_MODEL: z.string().min(1),
   TEXT_EMBEDDING_MODEL: z.string().min(1),
 });
@@ -51,6 +52,7 @@ const baseConfig = {
   MAX_MOVE_RETRIES: 8,
   MAX_VERTEX_RETRIES: 3,
   GEMINI_MODEL: "gemini-3-flash-preview",
+  MULTIMODAL_EMBEDDING_MODEL: "multimodalembedding@001",
   IMAGEN_MODEL: "imagen-4.0-generate-001",
   TEXT_EMBEDDING_MODEL: "text-embedding-005",
 } satisfies Config;
@@ -87,6 +89,7 @@ function envOverride(): Partial<Config> {
     MAX_MOVE_RETRIES: asInt("MAX_MOVE_RETRIES"),
     MAX_VERTEX_RETRIES: asInt("MAX_VERTEX_RETRIES"),
     GEMINI_MODEL: process.env.GEMINI_MODEL,
+    MULTIMODAL_EMBEDDING_MODEL: process.env.MULTIMODAL_EMBEDDING_MODEL,
     IMAGEN_MODEL: process.env.IMAGEN_MODEL,
     TEXT_EMBEDDING_MODEL: process.env.TEXT_EMBEDDING_MODEL,
   };

@@ -3,7 +3,6 @@ import express from "express";
 import { z } from "zod";
 import { generateFromPool, prewarmPool } from "../application/pool-service.js";
 import { config } from "../config/app-config.js";
-import type { Genome } from "../domain/types.js";
 import { generateImagenBase64, savePngBase64ToDisk } from "../generator/vertex-imagen-generator.js";
 import { filePathToPublicUrl } from "../infra/storage/pool-store.js";
 import { log } from "../observability/logger.js";
@@ -45,30 +44,7 @@ const debugScoreSchema = z.object({
   prompt: z.string().min(1),
   imageBase64: z.string().min(1),
   mimeType: z.string().min(1),
-  baseScene: z.string().min(1).optional(),
-  subject: z.string().min(1).optional(),
-  action: z.string().min(1).optional(),
 });
-
-function buildDebugGenome(input: z.infer<typeof debugScoreSchema>): Genome {
-  return {
-    baseScene: input.baseScene ?? "test scene",
-    subject: input.subject ?? "single subject",
-    action: input.action ?? "acting",
-    twist: [],
-    style: {
-      medium: "photo",
-      mood: "neutral",
-      lighting: "natural light",
-    },
-    composition: {
-      focus: "single_subject",
-      framing: "center",
-      backgroundClarity: "clear",
-    },
-    constraints: ["no text", "no logos", "no extra subjects"],
-  };
-}
 
 function workerPageHtml(): string {
   return `<!doctype html>
@@ -154,8 +130,8 @@ function workerPageHtml(): string {
     <h1>Worker Visual Debug (/worker)</h1>
     <div class="grid">
       <section class="card">
-        <h2>1) 画像を採点 (Gemini Scorer)</h2>
-        <p class="note">画像ファイルとプロンプトを送信して score を確認します。</p>
+        <h2>1) 画像×テキスト類似度 (Multimodal Embedding)</h2>
+        <p class="note">画像ファイルとプロンプトを送信して cosine/score01 を確認します。</p>
         <label>画像</label>
         <input id="scoreFile" type="file" accept="image/*" />
         <label>プロンプト</label>
@@ -333,14 +309,12 @@ app.post("/v1/debug/score", async (req, res) => {
   }
 
   const runId = randomId("debug-score");
-  const genome = buildDebugGenome(parsed.data);
   try {
     const scores = await withTimeout(
       evaluateWithGeminiInline({
         imageBase64: parsed.data.imageBase64,
         mimeType: parsed.data.mimeType,
         prompt: parsed.data.prompt,
-        genome,
         runId,
         generation: 0,
         candidateIndex: 0,
@@ -348,7 +322,7 @@ app.post("/v1/debug/score", async (req, res) => {
       config.REQUEST_TIMEOUT_MS,
       "request timeout",
     );
-    res.status(200).json({ runId, prompt: parsed.data.prompt, genome, scores });
+    res.status(200).json({ runId, prompt: parsed.data.prompt, scores });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log("error", "debug_score_error", { runId, message });

@@ -1,11 +1,11 @@
+import { readFile } from "node:fs/promises";
 import Bottleneck from "bottleneck";
 import { GoogleAuth } from "google-auth-library";
 import { config } from "../config/app-config.js";
+import type { ScoreBreakdown } from "../domain/types.js";
 import { log } from "../observability/logger.js";
-import type { Genome, ScoreBreakdown } from "../domain/types.js";
 import { withRetry } from "../shared/utils.js";
-import { computeFitness } from "./fitness.js";
-import { parseGeminiScoreText } from "./gemini-parser.js";
+import { cosineSimilarity } from "./score-math.js";
 
 const auth = new GoogleAuth({
   scopes: ["https://www.googleapis.com/auth/cloud-platform"],
@@ -30,6 +30,55 @@ function parseStatus(error: unknown): number | undefined {
     return undefined;
   }
   return Number.parseInt(match[1], 10);
+}
+
+function normalizeCosineToScore01(cosine: number): number {
+  const normalized = (Math.max(-1, Math.min(1, cosine)) + 1) / 2;
+  return Math.max(0, Math.min(1, normalized));
+}
+
+function toNumericVector(value: unknown): number[] | undefined {
+  if (Array.isArray(value)) {
+    const vector = value.filter((item): item is number => typeof item === "number");
+    return vector.length > 0 ? vector : undefined;
+  }
+  const obj = asObject(value);
+  const nestedValues = obj.values;
+  if (Array.isArray(nestedValues)) {
+    const vector = nestedValues.filter((item): item is number => typeof item === "number");
+    return vector.length > 0 ? vector : undefined;
+  }
+  return undefined;
+}
+
+function parseMultimodalVectors(json: unknown): { text: number[]; image: number[] } {
+  const top = asObject(json);
+  const predictions = Array.isArray(top.predictions) ? top.predictions : [];
+  const first = asObject(predictions[0]);
+  const embeddings = asObject(first.embeddings);
+
+  const textCandidates = [
+    first.textEmbedding,
+    asObject(first.textEmbedding).values,
+    embeddings.textEmbedding,
+    asObject(embeddings.textEmbedding).values,
+  ];
+
+  const imageCandidates = [
+    first.imageEmbedding,
+    asObject(first.imageEmbedding).values,
+    embeddings.imageEmbedding,
+    asObject(embeddings.imageEmbedding).values,
+  ];
+
+  const text = textCandidates.map(toNumericVector).find((vector): vector is number[] => Array.isArray(vector));
+  const image = imageCandidates.map(toNumericVector).find((vector): vector is number[] => Array.isArray(vector));
+
+  if (!text || !image) {
+    throw new Error("multimodal embedding response missing text/image vectors");
+  }
+
+  return { text, image };
 }
 
 const geminiLimiter = new Bottleneck({
@@ -69,173 +118,34 @@ async function vertexPost(url: string, body: unknown): Promise<unknown> {
   }
 }
 
-const scoreSchema = {
-  type: "OBJECT",
-  properties: {
-    readability: { type: "NUMBER" },
-    twist: { type: "NUMBER" },
-    aesthetic: { type: "NUMBER" },
-    labels: {
-      type: "OBJECT",
-      properties: {
-        scene: { type: "STRING" },
-        subject: { type: "STRING" },
-        action: { type: "STRING" },
-      },
-    },
-    flags: {
-      type: "ARRAY",
-      items: { type: "STRING" },
-    },
-    short_reason: { type: "STRING" },
-  },
-  required: ["readability", "twist", "aesthetic", "labels", "flags", "short_reason"],
-};
-
-export async function evaluateWithGemini(params: {
-  imageUri: string;
+async function scoreWithMultimodalEmbedding(params: {
   prompt: string;
-  genome: Genome;
-  runId: string;
-  generation: number;
-  candidateIndex: number;
-}): Promise<ScoreBreakdown> {
-  return requestGeminiScore({
-    prompt: params.prompt,
-    genome: params.genome,
-    runId: params.runId,
-    generation: params.generation,
-    candidateIndex: params.candidateIndex,
-    imagePart: {
-      fileData: {
-        mimeType: "image/png",
-        fileUri: params.imageUri,
-      },
-    },
-  });
-}
-
-export async function evaluateWithGeminiInline(params: {
   imageBase64: string;
-  mimeType: string;
-  prompt: string;
-  genome: Genome;
   runId: string;
   generation: number;
   candidateIndex: number;
 }): Promise<ScoreBreakdown> {
-  return requestGeminiScore({
-    prompt: params.prompt,
-    genome: params.genome,
-    runId: params.runId,
-    generation: params.generation,
-    candidateIndex: params.candidateIndex,
-    imagePart: {
-      inlineData: {
-        mimeType: params.mimeType,
-        data: params.imageBase64,
-      },
-    },
-  });
-}
-
-async function requestGeminiScore(params: {
-  prompt: string;
-  genome: Genome;
-  runId: string;
-  generation: number;
-  candidateIndex: number;
-  imagePart: Record<string, unknown>;
-}): Promise<ScoreBreakdown> {
-  const json = await geminiGenerate({
-    prompt: params.prompt,
-    genome: params.genome,
-    imagePart: params.imagePart,
-    runId: params.runId,
-    generation: params.generation,
-    candidateIndex: params.candidateIndex,
-    retryMode: false,
-  });
-  const parsed = tryParseGeminiResponse(json);
-  if (parsed) {
-    return parsed;
-  }
-
-  // Recovery pass for truncated/markdown-formatted outputs.
-  const retryJson = await geminiGenerate({
-    prompt: params.prompt,
-    genome: params.genome,
-    imagePart: params.imagePart,
-    runId: params.runId,
-    generation: params.generation,
-    candidateIndex: params.candidateIndex,
-    retryMode: true,
-  });
-  const parsedRetry = tryParseGeminiResponse(retryJson);
-  if (parsedRetry) {
-    return parsedRetry;
-  }
-
-  return {
-    readability: 0,
-    twist: 0,
-    aesthetic: 0,
-    fitness: computeFitness(0, 0, 0),
-    labels: {},
-    flags: ["gemini_parse_failed_fallback"],
-    short_reason: "gemini response parse failed; fallback score applied",
-  };
-}
-
-async function geminiGenerate(params: {
-  prompt: string;
-  genome: Genome;
-  imagePart: Record<string, unknown>;
-  runId: string;
-  generation: number;
-  candidateIndex: number;
-  retryMode: boolean;
-}): Promise<unknown> {
-  const url = `https://aiplatform.googleapis.com/v1/projects/${config.GOOGLE_CLOUD_PROJECT}/locations/global/publishers/google/models/${config.GEMINI_MODEL}:generateContent`;
-
-  const instruction = params.retryMode
-    ? "出力はJSONオブジェクト1個のみ。前置き文・コードフェンス・説明文は禁止。"
-    : "あなたは画像審査員です。readability/twist/aestheticを0..1で厳密採点し、指定JSONのみを返してください。";
+  const url = `https://aiplatform.googleapis.com/v1/projects/${config.GOOGLE_CLOUD_PROJECT}/locations/global/publishers/google/models/${config.MULTIMODAL_EMBEDDING_MODEL}:predict`;
 
   const body = {
-    contents: [
+    instances: [
       {
-        role: "user",
-        parts: [
-          {
-            text: instruction,
-          },
-          {
-            text: `Prompt: ${params.prompt}`,
-          },
-          {
-            text: `Genome: ${JSON.stringify(params.genome)}`,
-          },
-          params.imagePart,
-        ],
+        text: params.prompt,
+        image: {
+          bytesBase64Encoded: params.imageBase64,
+        },
       },
     ],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 256,
-      responseMimeType: "application/json",
-      responseSchema: scoreSchema,
-    },
   };
 
-  return withRetry(
+  const json = await withRetry(
     () =>
       geminiLimiter.schedule(async () => {
-        log("info", "gemini_request", {
+        log("info", "multimodal_embedding_request", {
           runId: params.runId,
           generation: params.generation,
           candidateIndex: params.candidateIndex,
-          retryMode: params.retryMode,
+          model: config.MULTIMODAL_EMBEDDING_MODEL,
         });
         return vertexPost(url, body);
       }),
@@ -245,24 +155,76 @@ async function geminiGenerate(params: {
     },
     config.MAX_VERTEX_RETRIES,
   );
+
+  const vectors = parseMultimodalVectors(json);
+  const cosine = cosineSimilarity(vectors.text, vectors.image);
+  const score01 = normalizeCosineToScore01(cosine);
+
+  return {
+    cosine,
+    score01,
+    flags: [],
+  };
 }
 
-function tryParseGeminiResponse(json: unknown): ScoreBreakdown | undefined {
-  const obj = asObject(json);
-  const candidates = Array.isArray(obj.candidates) ? obj.candidates : [];
-  const first = asObject(candidates[0]);
-  const content = asObject(first.content);
-  const parts = Array.isArray(content.parts) ? content.parts : [];
-  const text = parts
-    .map((part) => {
-      const obj = asObject(part);
-      return typeof obj.text === "string" ? obj.text : "";
-    })
-    .join("\n")
-    .trim() || "{}";
+function fileUriToPath(uri: string): string {
+  if (!uri.startsWith("file://")) {
+    throw new Error("evaluateWithGemini currently supports only file:// imageUri");
+  }
+  return decodeURIComponent(uri.slice("file://".length));
+}
+
+export async function evaluateWithGemini(params: {
+  imageUri: string;
+  prompt: string;
+  runId: string;
+  generation: number;
+  candidateIndex: number;
+}): Promise<ScoreBreakdown> {
+  const filePath = fileUriToPath(params.imageUri);
+  const imageBuffer = await readFile(filePath);
+  const imageBase64 = imageBuffer.toString("base64");
+
+  return evaluateWithGeminiInline({
+    imageBase64,
+    mimeType: "image/png",
+    prompt: params.prompt,
+    runId: params.runId,
+    generation: params.generation,
+    candidateIndex: params.candidateIndex,
+  });
+}
+
+export async function evaluateWithGeminiInline(params: {
+  imageBase64: string;
+  mimeType: string;
+  prompt: string;
+  runId: string;
+  generation: number;
+  candidateIndex: number;
+}): Promise<ScoreBreakdown> {
+  void params.mimeType;
+
   try {
-    return parseGeminiScoreText(text);
-  } catch {
-    return undefined;
+    return await scoreWithMultimodalEmbedding({
+      prompt: params.prompt,
+      imageBase64: params.imageBase64,
+      runId: params.runId,
+      generation: params.generation,
+      candidateIndex: params.candidateIndex,
+    });
+  } catch (error) {
+    log("warn", "multimodal_embedding_failed", {
+      runId: params.runId,
+      generation: params.generation,
+      candidateIndex: params.candidateIndex,
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return {
+      cosine: 0,
+      score01: 0,
+      flags: ["multimodal_embedding_failed_fallback"],
+    };
   }
 }
