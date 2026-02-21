@@ -41,19 +41,23 @@ async function callImagenPython(params: {
   generation: number;
   candidateIndex: number;
 }): Promise<string> {
-  const { stdout } = await execFile("python3", [
-    pythonScriptPath,
-    "--project",
-    config.GOOGLE_CLOUD_PROJECT,
-    "--region",
-    config.IMAGEN_REGION,
-    "--model",
-    config.IMAGEN_MODEL,
-    "--prompt",
-    params.prompt,
-    "--aspectRatio",
-    params.aspectRatio,
-  ]);
+  const { stdout } = await execFile(
+    "python3",
+    [
+      pythonScriptPath,
+      "--project",
+      config.GOOGLE_CLOUD_PROJECT,
+      "--region",
+      config.IMAGEN_REGION,
+      "--model",
+      config.IMAGEN_MODEL,
+      "--prompt",
+      params.prompt,
+      "--aspectRatio",
+      params.aspectRatio,
+    ],
+    { maxBuffer: 20 * 1024 * 1024 },
+  );
 
   const parsed = JSON.parse(stdout) as { bytesBase64Encoded?: string; error?: string };
   if (!parsed.bytesBase64Encoded) {

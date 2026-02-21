@@ -19,7 +19,6 @@ READABILITY_CUTOFF_START = 0.55
 READABILITY_CUTOFF_END = 0.70
 PARENT_SUBJECT_LIMIT = 2
 FINAL_PICK_TOP_K = 5
-INHERIT_ACROSS_GENERATIONS = False
 GENOME_PROMPT = "Create a weird but readable single-subject image concept for a party guessing game."
 REQUIRED_CONSTRAINTS: list[str] = ["no text", "no logos", "no collage", "no extra subjects"]
 TWIST_TYPES: list[str] = ["material", "scale", "role", "physics", "causality"]
@@ -38,7 +37,6 @@ def load_settings(path: str) -> None:
     global READABILITY_CUTOFF_END
     global PARENT_SUBJECT_LIMIT
     global FINAL_PICK_TOP_K
-    global INHERIT_ACROSS_GENERATIONS
     global GENOME_PROMPT
     global REQUIRED_CONSTRAINTS
     global TWIST_TYPES
@@ -52,7 +50,6 @@ def load_settings(path: str) -> None:
     READABILITY_CUTOFF_END = float(settings.get("readability_cutoff_end", 0.70))
     PARENT_SUBJECT_LIMIT = int(settings.get("parent_subject_limit", 2))
     FINAL_PICK_TOP_K = int(settings.get("final_pick_top_k", 5))
-    INHERIT_ACROSS_GENERATIONS = bool(settings.get("inherit_across_generations", False))
 
     genome_prompt = settings.get("genome_prompt")
     if isinstance(genome_prompt, str) and genome_prompt.strip():
@@ -538,11 +535,8 @@ def main() -> int:
         population=args.population,
         parents=args.parents,
         aspectRatio=args.aspectRatio,
-        inheritAcrossGenerations=INHERIT_ACROSS_GENERATIONS,
         settingsPath=args.settingsPath,
     )
-
-    parent_genomes: list[dict[str, Any]] = []
     best_overall: dict[str, Any] | None = None
     all_candidates: list[dict[str, Any]] = []
     prompt_history: list[dict[str, Any]] = []
@@ -555,9 +549,6 @@ def main() -> int:
 
         genomes: list[dict[str, Any]] = []
         for i in range(args.population):
-            parent = None
-            if INHERIT_ACROSS_GENERATIONS and generation > 0 and parent_genomes:
-                parent = random.choice(parent_genomes)
             genome = suggest_genome(
                 project=args.project,
                 model=args.geminiModel,
@@ -567,11 +558,11 @@ def main() -> int:
                 candidate_index=i,
                 max_retries=args.maxVertexRetries,
                 recent_subjects=recent_subjects,
-                parent_genome=parent,
+                parent_genome=None,
             )
             genomes.append(genome)
 
-        novelty_refs = parent_genomes if (INHERIT_ACROSS_GENERATIONS and parent_genomes) else genomes
+        novelty_refs = genomes
         seen_signatures: set[str] = set()
         candidates: list[dict[str, Any]] = []
 
@@ -685,7 +676,7 @@ def main() -> int:
 
         parent_pool = ranked_survivors if ranked_survivors else ranked_all
         parent_count = max(1, min(args.parents, len(parent_pool)))
-        parent_genomes = select_diverse_parents(parent_pool, parent_count)
+        selected_parents = select_diverse_parents(parent_pool, parent_count)
 
         log_step(
             args.runId,
@@ -694,7 +685,7 @@ def main() -> int:
             generation=generation,
             candidates=len(candidates),
             survivors=len(survivors),
-            selectedParents=len(parent_genomes),
+            selectedParents=len(selected_parents),
         )
 
     if best_overall is None:

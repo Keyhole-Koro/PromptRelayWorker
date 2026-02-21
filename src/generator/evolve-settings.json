@@ -1,5 +1,4 @@
 {
-  "inherit_across_generations": false,
   "readability_cutoff_start": 0.55,
   "readability_cutoff_end": 0.7,
   "parent_subject_limit": 2,
