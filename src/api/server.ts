@@ -6,6 +6,7 @@ import type { Genome } from "../domain/types.js";
 import { generateImagenToGcs } from "../generator/vertex-imagen-generator.js";
 import { acquireAndMoveOneAvailableItem, signGsUri } from "../infra/storage/pool-store.js";
 import { log } from "../observability/logger.js";
+import { scorePromptAlignment } from "../scorer/prompt-alignment.js";
 import { evaluateWithGeminiInline } from "../scorer/vertex-gemini-scorer.js";
 import { randomId, withTimeout } from "../shared/utils.js";
 
@@ -31,6 +32,11 @@ const generateSchema = z.object({
 const debugGenerateSchema = z.object({
   prompt: z.string().min(1),
   aspectRatio: z.enum(["1:1", "16:9"]).optional(),
+});
+
+const promptScoreSchema = z.object({
+  promptA: z.string().min(1),
+  promptB: z.string().min(1),
 });
 
 const debugScoreSchema = z.object({
@@ -184,6 +190,17 @@ function workerPageHtml(): string {
         <img id="poolImg" class="img" alt="pooled image" />
         <pre id="poolOut"></pre>
       </section>
+
+      <section class="card">
+        <h2>4) プロンプト類似度 (Embedding)</h2>
+        <p class="note">2つのプロンプトを embedding 化して cosine 類似度を返します。</p>
+        <label>Prompt A</label>
+        <textarea id="promptA" placeholder="A cat detective in Tokyo rain"></textarea>
+        <label>Prompt B</label>
+        <textarea id="promptB" placeholder="A detective cat in rainy Tokyo street"></textarea>
+        <button id="promptBtn" type="button">類似度を計算</button>
+        <pre id="promptOut"></pre>
+      </section>
     </div>
   </div>
 
@@ -270,6 +287,25 @@ function workerPageHtml(): string {
         out.textContent = String(e);
       }
     });
+
+    byId('promptBtn').addEventListener('click', async () => {
+      const out = byId('promptOut');
+      out.textContent = 'running...';
+      try {
+        const res = await fetch('/v1/debug/prompt-score', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            promptA: byId('promptA').value || 'test prompt a',
+            promptB: byId('promptB').value || 'test prompt b',
+          }),
+        });
+        const json = await res.json();
+        out.textContent = JSON.stringify(json, null, 2);
+      } catch (e) {
+        out.textContent = String(e);
+      }
+    });
   </script>
 </body>
 </html>`;
@@ -314,6 +350,37 @@ app.post("/v1/debug/score", async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log("error", "debug_score_error", { runId, message });
+    res.status(500).json({ error: message, runId });
+  }
+});
+
+app.post("/v1/debug/prompt-score", async (req, res) => {
+  const parsed = promptScoreSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  const runId = randomId("debug-prompt-score");
+  try {
+    const alignment = await withTimeout(
+      scorePromptAlignment({
+        promptA: parsed.data.promptA,
+        promptB: parsed.data.promptB,
+        runId,
+      }),
+      config.REQUEST_TIMEOUT_MS,
+      "request timeout",
+    );
+    res.status(200).json({
+      runId,
+      promptA: parsed.data.promptA,
+      promptB: parsed.data.promptB,
+      ...alignment,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("error", "debug_prompt_score_error", { runId, message });
     res.status(500).json({ error: message, runId });
   }
 });

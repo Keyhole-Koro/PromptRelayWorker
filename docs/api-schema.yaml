@@ -104,6 +104,22 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DebugGenerateResponse'
+  /v1/debug/prompt-score:
+    post:
+      summary: Compare two prompts via text embeddings cosine similarity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromptScoreRequest'
+      responses:
+        '200':
+          description: Prompt similarity score
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptScoreResponse'
 components:
   schemas:
     AspectRatio:
@@ -254,3 +270,18 @@ components:
         imageUri: { type: string }
         signedUrl: { type: string }
       required: [runId, itemId, imageUri, signedUrl]
+    PromptScoreRequest:
+      type: object
+      properties:
+        promptA: { type: string }
+        promptB: { type: string }
+      required: [promptA, promptB]
+    PromptScoreResponse:
+      type: object
+      properties:
+        runId: { type: string }
+        promptA: { type: string }
+        promptB: { type: string }
+        cosine: { type: number, minimum: -1, maximum: 1 }
+        score01: { type: number, minimum: 0, maximum: 1 }
+      required: [runId, promptA, promptB, cosine, score01]

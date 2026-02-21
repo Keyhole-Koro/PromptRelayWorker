@@ -15,6 +15,7 @@ Node.js + TypeScript worker for pre-generating topic images with Vertex AI and s
 - `POST /v1/topic/generate` (same behavior as `/generate`)
 - `POST /v1/debug/score`
 - `POST /v1/debug/generate`
+- `POST /v1/debug/prompt-score`
 - OpenAPI schema: `docs/api-schema.yaml`
 
 ## GCE Setup
@@ -47,6 +48,21 @@ npm run start
 ```
 
 Worker listens on `127.0.0.1:PORT`.
+
+## Dev Mode Note
+If `promptrelay-worker` is running via systemd, port `8091` is already in use and `npm run dev` fails with `EADDRINUSE`.
+
+Stop/disable service before local dev:
+```bash
+sudo systemctl stop promptrelay-worker
+sudo systemctl disable promptrelay-worker
+npm run dev
+```
+
+Re-enable after dev:
+```bash
+sudo systemctl enable --now promptrelay-worker
+```
 
 ## Quick Curl
 Health:
