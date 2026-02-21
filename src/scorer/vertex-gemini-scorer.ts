@@ -4,6 +4,7 @@ import { config } from "../config/app-config.js";
 import { log } from "../observability/logger.js";
 import type { Genome, ScoreBreakdown } from "../domain/types.js";
 import { withRetry } from "../shared/utils.js";
+import { computeFitness } from "./fitness.js";
 import { parseGeminiScoreText } from "./gemini-parser.js";
 
 const auth = new GoogleAuth({
@@ -146,7 +147,60 @@ async function requestGeminiScore(params: {
   candidateIndex: number;
   imagePart: Record<string, unknown>;
 }): Promise<ScoreBreakdown> {
+  const json = await geminiGenerate({
+    prompt: params.prompt,
+    genome: params.genome,
+    imagePart: params.imagePart,
+    runId: params.runId,
+    generation: params.generation,
+    candidateIndex: params.candidateIndex,
+    retryMode: false,
+  });
+  const parsed = tryParseGeminiResponse(json);
+  if (parsed) {
+    return parsed;
+  }
+
+  // Recovery pass for truncated/markdown-formatted outputs.
+  const retryJson = await geminiGenerate({
+    prompt: params.prompt,
+    genome: params.genome,
+    imagePart: params.imagePart,
+    runId: params.runId,
+    generation: params.generation,
+    candidateIndex: params.candidateIndex,
+    retryMode: true,
+  });
+  const parsedRetry = tryParseGeminiResponse(retryJson);
+  if (parsedRetry) {
+    return parsedRetry;
+  }
+
+  return {
+    readability: 0,
+    twist: 0,
+    aesthetic: 0,
+    fitness: computeFitness(0, 0, 0),
+    labels: {},
+    flags: ["gemini_parse_failed_fallback"],
+    short_reason: "gemini response parse failed; fallback score applied",
+  };
+}
+
+async function geminiGenerate(params: {
+  prompt: string;
+  genome: Genome;
+  imagePart: Record<string, unknown>;
+  runId: string;
+  generation: number;
+  candidateIndex: number;
+  retryMode: boolean;
+}): Promise<unknown> {
   const url = `https://aiplatform.googleapis.com/v1/projects/${config.GOOGLE_CLOUD_PROJECT}/locations/global/publishers/google/models/${config.GEMINI_MODEL}:generateContent`;
+
+  const instruction = params.retryMode
+    ? "出力はJSONオブジェクト1個のみ。前置き文・コードフェンス・説明文は禁止。"
+    : "あなたは画像審査員です。readability/twist/aestheticを0..1で厳密採点し、指定JSONのみを返してください。";
 
   const body = {
     contents: [
@@ -154,8 +208,7 @@ async function requestGeminiScore(params: {
         role: "user",
         parts: [
           {
-            text:
-              "あなたは画像審査員です。readability/twist/aestheticを0..1で厳密採点し、指定JSONのみを返してください。",
+            text: instruction,
           },
           {
             text: `Prompt: ${params.prompt}`,
@@ -175,13 +228,14 @@ async function requestGeminiScore(params: {
     },
   };
 
-  const json = await withRetry(
+  return withRetry(
     () =>
       geminiLimiter.schedule(async () => {
         log("info", "gemini_request", {
           runId: params.runId,
           generation: params.generation,
           candidateIndex: params.candidateIndex,
+          retryMode: params.retryMode,
         });
         return vertexPost(url, body);
       }),
@@ -191,14 +245,24 @@ async function requestGeminiScore(params: {
     },
     config.MAX_VERTEX_RETRIES,
   );
+}
 
+function tryParseGeminiResponse(json: unknown): ScoreBreakdown | undefined {
   const obj = asObject(json);
   const candidates = Array.isArray(obj.candidates) ? obj.candidates : [];
   const first = asObject(candidates[0]);
   const content = asObject(first.content);
   const parts = Array.isArray(content.parts) ? content.parts : [];
-  const firstPart = asObject(parts[0]);
-  const text = typeof firstPart.text === "string" ? firstPart.text : "{}";
-
-  return parseGeminiScoreText(text);
+  const text = parts
+    .map((part) => {
+      const obj = asObject(part);
+      return typeof obj.text === "string" ? obj.text : "";
+    })
+    .join("\n")
+    .trim() || "{}";
+  try {
+    return parseGeminiScoreText(text);
+  } catch {
+    return undefined;
+  }
 }

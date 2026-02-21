@@ -1,10 +1,11 @@
+import { join } from "node:path";
 import express from "express";
 import { z } from "zod";
 import { generateFromPool, prewarmPool } from "../application/pool-service.js";
 import { config } from "../config/app-config.js";
 import type { Genome } from "../domain/types.js";
-import { generateImagenToGcs } from "../generator/vertex-imagen-generator.js";
-import { acquireAndMoveOneAvailableItem, signGsUri } from "../infra/storage/pool-store.js";
+import { generateImagenBase64, savePngBase64ToDisk } from "../generator/vertex-imagen-generator.js";
+import { filePathToPublicUrl } from "../infra/storage/pool-store.js";
 import { log } from "../observability/logger.js";
 import { scorePromptAlignment } from "../scorer/prompt-alignment.js";
 import { evaluateWithGeminiInline } from "../scorer/vertex-gemini-scorer.js";
@@ -12,6 +13,7 @@ import { randomId, withTimeout } from "../shared/utils.js";
 
 const app = express();
 app.use(express.json({ limit: "15mb" }));
+app.use("/files", express.static(config.LOCAL_DATA_DIR));
 
 const prewarmSchema = z.object({
   count: z.number().int().positive().max(200).optional(),
@@ -165,7 +167,7 @@ function workerPageHtml(): string {
 
       <section class="card">
         <h2>2) 画像生成 (Imagen Generator)</h2>
-        <p class="note">プロンプトから1枚生成して表示します。</p>
+        <p class="note">プロンプトから1枚生成してローカルdisk保存・表示します。</p>
         <label>プロンプト</label>
         <textarea id="genPrompt" placeholder="A cat detective in Tokyo rain"></textarea>
         <label>アスペクト比</label>
@@ -395,14 +397,13 @@ app.post("/v1/debug/generate", async (req, res) => {
   const runId = randomId("debug-generate");
   const itemId = randomId("item");
   const aspectRatio = parsed.data.aspectRatio ?? "1:1";
-  const storageUri = `gs://${config.GCS_BUCKET}/debug/generated/${itemId}/`;
+  const filePath = join(config.LOCAL_DATA_DIR, "debug", "generated", itemId, "generated.png");
 
   try {
-    const imageUri = await withTimeout(
-      generateImagenToGcs({
+    const imageBase64 = await withTimeout(
+      generateImagenBase64({
         prompt: parsed.data.prompt,
         aspectRatio,
-        storageUri,
         runId,
         generation: 0,
         candidateIndex: 0,
@@ -410,7 +411,9 @@ app.post("/v1/debug/generate", async (req, res) => {
       config.REQUEST_TIMEOUT_MS,
       "request timeout",
     );
-    const signedUrl = await signGsUri(imageUri);
+    await savePngBase64ToDisk(imageBase64, filePath);
+    const imageUri = `file://${filePath}`;
+    const signedUrl = filePathToPublicUrl(filePath);
     res.status(200).json({ runId, itemId, imageUri, signedUrl });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

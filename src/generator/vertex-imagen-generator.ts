@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import Bottleneck from "bottleneck";
 import { GoogleAuth } from "google-auth-library";
 import { config } from "../config/app-config.js";
@@ -66,10 +68,9 @@ async function vertexPost(url: string, body: unknown): Promise<unknown> {
   }
 }
 
-export async function generateImagenToGcs(params: {
+export async function generateImagenBase64(params: {
   prompt: string;
   aspectRatio: "1:1" | "16:9";
-  storageUri: string;
   runId: string;
   generation: number;
   candidateIndex: number;
@@ -80,9 +81,6 @@ export async function generateImagenToGcs(params: {
     parameters: {
       sampleCount: 1,
       aspectRatio: params.aspectRatio,
-      outputOptions: {
-        storageUri: params.storageUri,
-      },
     },
   };
 
@@ -107,13 +105,18 @@ export async function generateImagenToGcs(params: {
   const predictions = Array.isArray(top.predictions) ? top.predictions : [];
   const first = asObject(predictions[0]);
   const nested = asObject(first.image);
-  const uri =
-    (typeof first.gcsUri === "string" ? first.gcsUri : undefined) ??
-    (typeof nested.gcsUri === "string" ? nested.gcsUri : undefined);
+  const bytes =
+    (typeof first.bytesBase64Encoded === "string" ? first.bytesBase64Encoded : undefined) ??
+    (typeof nested.bytesBase64Encoded === "string" ? nested.bytesBase64Encoded : undefined);
 
-  if (!uri) {
-    throw new Error("imagen response missing gcsUri");
+  if (!bytes) {
+    throw new Error("imagen response missing bytesBase64Encoded");
   }
 
-  return uri;
+  return bytes;
+}
+
+export async function savePngBase64ToDisk(base64Png: string, filePath: string): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, Buffer.from(base64Png, "base64"));
 }

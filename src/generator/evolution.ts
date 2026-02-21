@@ -1,15 +1,17 @@
+import { join } from "node:path";
 import { config } from "../config/app-config.js";
 import { log } from "../observability/logger.js";
 import { computeFitness } from "../scorer/fitness.js";
-import { evaluateWithGemini } from "../scorer/vertex-gemini-scorer.js";
+import { evaluateWithGeminiInline } from "../scorer/vertex-gemini-scorer.js";
 import type { AspectRatio, EvolveBudget, Genome, PoolItemMeta, ScoreBreakdown } from "../domain/types.js";
 import { mapLimit } from "../shared/utils.js";
-import { generateImagenToGcs } from "./vertex-imagen-generator.js";
+import { generateImagenBase64, savePngBase64ToDisk } from "./vertex-imagen-generator.js";
 
 type Candidate = {
   genome: Genome;
   prompt: string;
-  imageUri: string;
+  imageBase64: string;
+  tempImagePath: string;
   scores: ScoreBreakdown;
   generation: number;
 };
@@ -111,8 +113,7 @@ export async function evolveOneItem(params: {
   itemId: string;
   budget: EvolveBudget;
   aspectRatio: AspectRatio;
-  imagenTempPrefix: string;
-}): Promise<PoolItemMeta & { tempImageUri: string }> {
+}): Promise<PoolItemMeta & { tempImagePath: string }> {
   const baseScene = pick(BASE_SCENES);
   let population: Genome[] = Array.from({ length: params.budget.population }, () => randomGenome(baseScene));
   let bestOverall: Candidate | undefined;
@@ -121,17 +122,19 @@ export async function evolveOneItem(params: {
     const candidates = await mapLimit(population, config.MAX_CONCURRENCY_IMAGEN, async (genome, i) => {
       const candidateId = `${params.itemId}-g${generation}-i${i}`;
       const prompt = buildPrompt(genome);
-      const storageUri = `${params.imagenTempPrefix}${candidateId}/`;
-      const imageUri = await generateImagenToGcs({
+      const imageBase64 = await generateImagenBase64({
         prompt,
         aspectRatio: params.aspectRatio,
-        storageUri,
         runId: params.runId,
         generation,
         candidateIndex: i,
       });
-      const scores = await evaluateWithGemini({
-        imageUri,
+      const tempImagePath = join(config.LOCAL_DATA_DIR, "runs", params.runId, candidateId, "candidate.png");
+      await savePngBase64ToDisk(imageBase64, tempImagePath);
+
+      const scores = await evaluateWithGeminiInline({
+        imageBase64,
+        mimeType: "image/png",
         prompt,
         genome,
         runId: params.runId,
@@ -150,7 +153,7 @@ export async function evolveOneItem(params: {
         readability: scores.readability,
         filtered: scores.readability < 0.65,
       });
-      return { genome, prompt, imageUri, scores, generation } satisfies Candidate;
+      return { genome, prompt, imageBase64, tempImagePath, scores, generation } satisfies Candidate;
     });
 
     const viable = candidates.filter((c) => c.scores.readability >= 0.65);
@@ -191,6 +194,6 @@ export async function evolveOneItem(params: {
       ),
     },
     generation: bestOverall.generation,
-    tempImageUri: bestOverall.imageUri,
+    tempImagePath: bestOverall.tempImagePath,
   };
 }

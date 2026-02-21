@@ -27,7 +27,7 @@ Node.js + TypeScript worker for pre-generating topic images with Vertex AI and s
 - `roles/iam.serviceAccountTokenCreator` (for signed URL)
 4. Enable APIs:
 - Vertex AI API
-- Cloud Storage API
+- Cloud Storage API (not required for image persistence in disk mode)
 - IAM Service Account Credentials API
 
 ## Config
@@ -37,6 +37,7 @@ Required values to edit in `src/config/app-config.ts`:
 - `GOOGLE_CLOUD_PROJECT`
 - `IMAGEN_REGION`
 - `GCS_BUCKET`
+- `LOCAL_DATA_DIR`
 
 Optional env overrides are supported but not required.
 
@@ -92,11 +93,11 @@ If pool is empty:
 - status `503`
 - message: `pool empty。/v1/pool/prewarm を実行してください`
 
-## GCS Layout
-- `gs://{BUCKET}/{GCS_PREFIX_AVAILABLE}{itemId}/final.png`
-- `gs://{BUCKET}/{GCS_PREFIX_AVAILABLE}{itemId}/meta.json`
-- `gs://{BUCKET}/{GCS_PREFIX_USED}{itemId}/final.png`
-- `gs://{BUCKET}/{GCS_PREFIX_USED}{itemId}/meta.json`
+## Local Disk Layout
+- `{LOCAL_DATA_DIR}/{GCS_PREFIX_AVAILABLE}{itemId}/final.png`
+- `{LOCAL_DATA_DIR}/{GCS_PREFIX_AVAILABLE}{itemId}/meta.json`
+- `{LOCAL_DATA_DIR}/{GCS_PREFIX_USED}{itemId}/final.png`
+- `{LOCAL_DATA_DIR}/{GCS_PREFIX_USED}{itemId}/meta.json`
 
 ## Logging
 JSON logs include:

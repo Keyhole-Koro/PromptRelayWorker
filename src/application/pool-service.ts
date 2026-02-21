@@ -1,8 +1,8 @@
 import { config } from "../config/app-config.js";
-import { evolveOneItem } from "../generator/evolution.js";
-import { log } from "../observability/logger.js";
-import { acquireAndMoveOneAvailableItem, saveFinalItemToAvailable, signGsUri } from "../infra/storage/pool-store.js";
 import type { AspectRatio, EvolveBudget, GenerateRequest, GenerateResponse, PrewarmRequest, PrewarmResponse } from "../domain/types.js";
+import { evolveOneItem } from "../generator/evolution.js";
+import { acquireAndMoveOneAvailableItem, saveFinalItemToAvailable, signGsUri } from "../infra/storage/pool-store.js";
+import { log } from "../observability/logger.js";
 import { elapsedMs, mapLimit, nowMs, randomId, withTimeout } from "../shared/utils.js";
 
 function normalizeAspectRatio(input: string | undefined): AspectRatio {
@@ -35,7 +35,6 @@ export async function prewarmPool(input: PrewarmRequest): Promise<PrewarmRespons
           itemId,
           budget,
           aspectRatio,
-          imagenTempPrefix: `gs://${config.GCS_BUCKET}/runs/${runId}/`,
         });
         const saved = await saveFinalItemToAvailable(evolved);
         created.push({ itemId, gcsPrefix: saved.gcsPrefix });
@@ -83,9 +82,9 @@ export async function generateFromPool(input: GenerateRequest): Promise<Generate
   const started = nowMs();
   const aspectRatio = normalizeAspectRatio(input.aspectRatio);
 
-  const gcsStarted = nowMs();
+  const storeStarted = nowMs();
   const moved = await acquireAndMoveOneAvailableItem(aspectRatio);
-  const gcsMs = elapsedMs(gcsStarted);
+  const storeMs = elapsedMs(storeStarted);
 
   const signStarted = nowMs();
   const signedUrl = await signGsUri(moved.usedImageUri);
@@ -102,7 +101,7 @@ export async function generateFromPool(input: GenerateRequest): Promise<Generate
     itemId: moved.itemId,
     timingsMs: {
       total: elapsedMs(started),
-      gcs: gcsMs,
+      gcs: storeMs,
       sign: signMs,
     },
   };

@@ -45,3 +45,15 @@ test("parseGeminiScoreText applies defaults and clamps", () => {
 test("parseGeminiScoreText throws on invalid JSON", () => {
   assert.throws(() => parseGeminiScoreText("not-json"), /gemini structured output parse failed/);
 });
+
+test("parseGeminiScoreText parses fenced json with preface", () => {
+  const score = parseGeminiScoreText(`Here is the JSON requested:
+\`\`\`json
+{"readability":0.81,"twist":0.55,"aesthetic":0.61,"labels":{"scene":"street"},"flags":[],"short_reason":"ok"}
+\`\`\``);
+
+  assert.equal(score.readability, 0.81);
+  assert.equal(score.twist, 0.55);
+  assert.equal(score.aesthetic, 0.61);
+  assert.equal(score.short_reason, "ok");
+});

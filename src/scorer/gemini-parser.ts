@@ -8,10 +8,29 @@ function asObject(value: unknown): JsonObject {
   return typeof value === "object" && value !== null ? (value as JsonObject) : {};
 }
 
+function stripCodeFence(input: string): string {
+  const trimmed = input.trim();
+  const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenceMatch) {
+    return fenceMatch[1].trim();
+  }
+  return trimmed;
+}
+
+function extractFirstJsonObject(input: string): string {
+  const start = input.indexOf("{");
+  const end = input.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return input.slice(start, end + 1);
+  }
+  return input;
+}
+
 export function parseGeminiScoreText(text: string): ScoreBreakdown {
+  const normalized = extractFirstJsonObject(stripCodeFence(text));
   let parsed: JsonObject;
   try {
-    parsed = asObject(JSON.parse(text));
+    parsed = asObject(JSON.parse(normalized));
   } catch {
     throw new Error(`gemini structured output parse failed: ${text}`);
   }

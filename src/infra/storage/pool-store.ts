@@ -1,35 +1,51 @@
-import { Storage } from "@google-cloud/storage";
+import { constants } from "node:fs";
+import { copyFile, mkdir, open, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { config } from "../../config/app-config.js";
 import { log } from "../../observability/logger.js";
 import type { AspectRatio, PoolItemMeta } from "../../domain/types.js";
 import { randomId, sleep } from "../../shared/utils.js";
 
-const storage = new Storage({ projectId: config.GOOGLE_CLOUD_PROJECT });
-const bucket = storage.bucket(config.GCS_BUCKET);
-
 function trimSlash(s: string): string {
   return s.endsWith("/") ? s.slice(0, -1) : s;
 }
 
-function joinPrefix(prefix: string, itemId: string): string {
-  return `${trimSlash(prefix)}/${itemId}/`;
+function availableRoot(): string {
+  return join(config.LOCAL_DATA_DIR, trimSlash(config.GCS_PREFIX_AVAILABLE));
 }
 
-function gsUri(objectName: string): string {
-  return `gs://${config.GCS_BUCKET}/${objectName}`;
+function usedRoot(): string {
+  return join(config.LOCAL_DATA_DIR, trimSlash(config.GCS_PREFIX_USED));
 }
 
-export async function saveFinalItemToAvailable(meta: PoolItemMeta & { tempImageUri: string }): Promise<{ gcsPrefix: string }> {
-  const itemPrefix = joinPrefix(config.GCS_PREFIX_AVAILABLE, meta.itemId);
-  const finalPngName = `${itemPrefix}final.png`;
-  const metaName = `${itemPrefix}meta.json`;
+async function ensureDataRoots(): Promise<void> {
+  await Promise.all([
+    mkdir(availableRoot(), { recursive: true }),
+    mkdir(usedRoot(), { recursive: true }),
+    mkdir(join(config.LOCAL_DATA_DIR, "debug", "generated"), { recursive: true }),
+  ]);
+}
 
-  const sourcePath = meta.tempImageUri.replace(`gs://${config.GCS_BUCKET}/`, "");
-  await bucket.file(sourcePath).copy(bucket.file(finalPngName), {
-    preconditionOpts: { ifGenerationMatch: 0 },
-  });
+function itemDir(root: string, itemId: string): string {
+  return join(root, itemId);
+}
 
-  await bucket.file(metaName).save(
+export function filePathToPublicUrl(filePath: string): string {
+  const rel = filePath.replace(`${config.LOCAL_DATA_DIR}/`, "");
+  return `/files/${rel.split("\\").join("/")}`;
+}
+
+export async function saveFinalItemToAvailable(meta: PoolItemMeta & { tempImagePath: string }): Promise<{ gcsPrefix: string }> {
+  await ensureDataRoots();
+  const dir = itemDir(availableRoot(), meta.itemId);
+  await mkdir(dir, { recursive: true });
+
+  const finalPng = join(dir, "final.png");
+  const metaJson = join(dir, "meta.json");
+
+  await copyFile(meta.tempImagePath, finalPng, constants.COPYFILE_EXCL);
+  await writeFile(
+    metaJson,
     JSON.stringify(
       {
         itemId: meta.itemId,
@@ -44,79 +60,46 @@ export async function saveFinalItemToAvailable(meta: PoolItemMeta & { tempImageU
       null,
       2,
     ),
-    {
-      resumable: false,
-      contentType: "application/json; charset=utf-8",
-      preconditionOpts: { ifGenerationMatch: 0 },
-    },
+    "utf8",
   );
 
-  return { gcsPrefix: gsUri(itemPrefix) };
+  return { gcsPrefix: `file://${dir}/` };
 }
 
 type ClaimedItem = {
   itemId: string;
   meta: PoolItemMeta;
-  availableMetaName: string;
-  availableFinalName: string;
-  claimName: string;
+  dirPath: string;
+  claimPath: string;
 };
 
-async function listAvailableMetaFiles(): Promise<string[]> {
-  const [files] = await bucket.getFiles({ prefix: config.GCS_PREFIX_AVAILABLE });
-  return files
-    .map((f) => f.name)
-    .filter((name) => name.endsWith("/meta.json"));
+async function listItemDirs(root: string): Promise<string[]> {
+  await mkdir(root, { recursive: true });
+  const entries = await readdir(root, { withFileTypes: true });
+  return entries.filter((e) => e.isDirectory()).map((e) => join(root, e.name));
 }
 
-async function tryClaimMeta(metaName: string): Promise<ClaimedItem | undefined> {
-  const itemId = metaName.split("/").slice(-2, -1)[0];
-  const availablePrefix = joinPrefix(config.GCS_PREFIX_AVAILABLE, itemId);
-  const claimName = `${availablePrefix}.claim`;
-  const claimFile = bucket.file(claimName);
+async function tryClaimItem(dirPath: string): Promise<ClaimedItem | undefined> {
+  const itemId = basename(dirPath);
+  const claimPath = join(dirPath, ".claim");
 
   try {
-    await claimFile.save(JSON.stringify({ ts: new Date().toISOString(), claimId: randomId("claim") }), {
-      resumable: false,
-      contentType: "application/json",
-      preconditionOpts: { ifGenerationMatch: 0 },
-    });
+    const handle = await open(claimPath, "wx");
+    await handle.writeFile(JSON.stringify({ ts: new Date().toISOString(), claimId: randomId("claim") }), "utf8");
+    await handle.close();
   } catch {
     return undefined;
   }
 
   try {
-    const [raw] = await bucket.file(metaName).download();
-    const meta = JSON.parse(raw.toString("utf8")) as PoolItemMeta;
-    return {
-      itemId,
-      meta,
-      availableMetaName: metaName,
-      availableFinalName: `${availablePrefix}final.png`,
-      claimName,
-    };
+    const metaRaw = await readFile(join(dirPath, "meta.json"), "utf8");
+    const meta = JSON.parse(metaRaw) as PoolItemMeta;
+    return { itemId, meta, dirPath, claimPath };
   } catch (error) {
     log("warn", "claim_read_failed", { itemId, error: error instanceof Error ? error.message : String(error) });
-    await claimFile.delete({ ignoreNotFound: true });
+    await unlink(claimPath).catch(() => undefined);
     return undefined;
   }
-}
-
-async function copyDeleteSafe(srcName: string, dstName: string): Promise<void> {
-  const srcFile = bucket.file(srcName);
-  const [srcMeta] = await srcFile.getMetadata();
-  const generation = Number.parseInt(String(srcMeta.generation), 10);
-
-  await srcFile.copy(bucket.file(dstName), {
-    preconditionOpts: {
-      ifGenerationMatch: 0,
-    },
-  });
-
-  await srcFile.delete({
-    ignoreNotFound: false,
-    ifGenerationMatch: generation,
-  });
 }
 
 export async function acquireAndMoveOneAvailableItem(aspectRatio: AspectRatio): Promise<{
@@ -125,59 +108,67 @@ export async function acquireAndMoveOneAvailableItem(aspectRatio: AspectRatio): 
   usedMetaUri: string;
   meta: PoolItemMeta;
 }> {
+  await ensureDataRoots();
+
   for (let attempt = 0; attempt < config.MAX_MOVE_RETRIES; attempt += 1) {
-    const metaNames = await listAvailableMetaFiles();
-    if (metaNames.length === 0) {
+    const dirs = await listItemDirs(availableRoot());
+    if (dirs.length === 0) {
       throw new Error("pool_empty");
     }
 
-    const shuffled = [...metaNames].sort(() => Math.random() - 0.5);
-    for (const metaName of shuffled) {
-      const claimed = await tryClaimMeta(metaName);
+    const shuffled = [...dirs].sort(() => Math.random() - 0.5);
+    for (const dirPath of shuffled) {
+      const claimed = await tryClaimItem(dirPath);
       if (!claimed) {
         continue;
       }
 
       if (claimed.meta.aspectRatio !== aspectRatio) {
-        await bucket.file(claimed.claimName).delete({ ignoreNotFound: true });
+        await unlink(claimed.claimPath).catch(() => undefined);
         continue;
       }
 
-      const usedPrefix = joinPrefix(config.GCS_PREFIX_USED, claimed.itemId);
-      const usedFinalName = `${usedPrefix}final.png`;
-      const usedMetaName = `${usedPrefix}meta.json`;
-
+      const targetDir = itemDir(usedRoot(), claimed.itemId);
       try {
-        await copyDeleteSafe(claimed.availableFinalName, usedFinalName);
-        await copyDeleteSafe(claimed.availableMetaName, usedMetaName);
-        await bucket.file(claimed.claimName).delete({ ignoreNotFound: true });
-
-        return {
-          itemId: claimed.itemId,
-          usedImageUri: gsUri(usedFinalName),
-          usedMetaUri: gsUri(usedMetaName),
-          meta: claimed.meta,
-        };
+        await rename(claimed.dirPath, targetDir);
       } catch (error) {
-        await bucket.file(claimed.claimName).delete({ ignoreNotFound: true });
+        await unlink(claimed.claimPath).catch(() => undefined);
         log("warn", "move_conflict_retry", {
           itemId: claimed.itemId,
           error: error instanceof Error ? error.message : String(error),
         });
+        continue;
       }
+
+      await unlink(join(targetDir, ".claim")).catch(() => undefined);
+
+      const usedImagePath = join(targetDir, "final.png");
+      const usedMetaPath = join(targetDir, "meta.json");
+      return {
+        itemId: claimed.itemId,
+        usedImageUri: usedImagePath,
+        usedMetaUri: usedMetaPath,
+        meta: claimed.meta,
+      };
     }
+
     await sleep(100 + attempt * 120);
   }
 
   throw new Error("pool_busy_retry_exhausted");
 }
 
-export async function signGsUri(gsPath: string): Promise<string> {
-  const objectName = gsPath.replace(`gs://${config.GCS_BUCKET}/`, "");
-  const [url] = await bucket.file(objectName).getSignedUrl({
-    version: "v4",
-    action: "read",
-    expires: Date.now() + config.SIGNED_URL_TTL_SEC * 1000,
-  });
-  return url;
+export async function signGsUri(pathOrUri: string): Promise<string> {
+  if (pathOrUri.startsWith("/")) {
+    return filePathToPublicUrl(pathOrUri);
+  }
+  if (pathOrUri.startsWith("file://")) {
+    return filePathToPublicUrl(pathOrUri.replace("file://", ""));
+  }
+  return pathOrUri;
+}
+
+export async function clearDebugGenerated(): Promise<void> {
+  await rm(join(config.LOCAL_DATA_DIR, "debug", "generated"), { recursive: true, force: true });
+  await mkdir(join(config.LOCAL_DATA_DIR, "debug", "generated"), { recursive: true });
 }
