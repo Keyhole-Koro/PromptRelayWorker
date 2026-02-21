@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
 import express from "express";
 import { z } from "zod";
 import { generateFromPool, prewarmPool } from "../application/pool-service.js";
@@ -40,11 +41,58 @@ const promptScoreSchema = z.object({
   promptB: z.string().min(1),
 });
 
+const previewSchema = z.object({
+  requestId: z.string().min(1),
+  kind: z.enum(["player", "ai"]),
+  prompt: z.string().min(1),
+  isFinal: z.boolean().optional(),
+});
+
 const debugScoreSchema = z.object({
   prompt: z.string().min(1),
   imageBase64: z.string().min(1),
   mimeType: z.string().min(1),
 });
+
+const previewSeqByKind: Record<"player" | "ai", number> = {
+  player: 0,
+  ai: 0,
+};
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function mockPreviewSvg(params: {
+  kind: "player" | "ai";
+  seq: number;
+  prompt: string;
+  requestId: string;
+  isFinal: boolean;
+}): string {
+  const bg = params.kind === "player" ? "#0ea5e9" : "#9333ea";
+  const panel = params.kind === "player" ? "#082f49" : "#3b0764";
+  const promptPreview = params.prompt.slice(0, 160);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="${bg}" />
+  <rect x="64" y="64" width="896" height="896" rx="28" fill="${panel}" />
+  <text x="96" y="150" fill="#ffffff" font-size="48" font-family="Arial, sans-serif" font-weight="700">/preview mock (${params.kind})</text>
+  <text x="96" y="220" fill="#dbeafe" font-size="34" font-family="Arial, sans-serif">seq: ${params.seq}</text>
+  <text x="96" y="270" fill="#dbeafe" font-size="28" font-family="Arial, sans-serif">requestId: ${escapeXml(params.requestId)}</text>
+  <text x="96" y="320" fill="#dbeafe" font-size="28" font-family="Arial, sans-serif">final: ${params.isFinal ? "true" : "false"}</text>
+  <foreignObject x="96" y="380" width="832" height="540">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="color:#ffffff;font-size:30px;line-height:1.4;font-family:Arial,sans-serif;white-space:pre-wrap;word-break:break-word;">
+      ${escapeXml(promptPreview)}
+    </div>
+  </foreignObject>
+</svg>`;
+}
 
 function workerPageHtml(): string {
   return `<!doctype html>
@@ -392,6 +440,31 @@ app.post("/v1/debug/generate", async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log("error", "debug_generate_error", { runId, message });
+    res.status(500).json({ error: message, runId });
+  }
+});
+
+app.post("/preview", async (req, res) => {
+  const parsed = previewSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  const runId = randomId("preview");
+  const { kind, prompt, requestId, isFinal = false } = parsed.data;
+  const seq = ++previewSeqByKind[kind];
+  const filePath = join(config.LOCAL_DATA_DIR, "preview", kind, `${runId}-${seq}.svg`);
+
+  try {
+    await mkdir(join(config.LOCAL_DATA_DIR, "preview", kind), { recursive: true });
+    const svg = mockPreviewSvg({ kind, seq, prompt, requestId, isFinal });
+    await writeFile(filePath, svg, "utf8");
+    const imageUrl = filePathToPublicUrl(filePath);
+    res.status(200).json({ imageUrl, requestId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("error", "preview_generate_error", { runId, message, kind });
     res.status(500).json({ error: message, runId });
   }
 });
