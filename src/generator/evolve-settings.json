@@ -1,9 +1,14 @@
 {
   "readability_cutoff_start": 0.55,
   "readability_cutoff_end": 0.7,
-  "parent_subject_limit": 2,
   "final_pick_top_k": 5,
-  "genome_prompt": "Invent a fresh, surprising but immediately readable single-subject visual concept suitable for a party guessing game. Prioritize clarity first, then weirdness. Avoid repeating obvious cliches.",
-  "required_constraints": ["no text", "no logos", "no collage", "no extra subjects"],
+  "brainstorm_rounds": 3,
+  "brainstorm_batch": 18,
+  "genome_prompt": "Invent a fresh, surprising but immediately readable single-subject visual concept set for a party guessing game. Maximize variety and avoid repetitive cliches.",
+  "required_constraints": [
+    "keep one clear subject",
+    "keep the scene readable at a glance",
+    "avoid visual clutter"
+  ],
   "twist_types": ["material", "scale", "role", "physics", "causality"]
 }

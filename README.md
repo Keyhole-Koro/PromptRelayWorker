@@ -115,6 +115,8 @@ Route example is in `deploy/Caddyfile` and exposes `/worker`, `/v1/*`, `/generat
 
 
 ``` generate image
+cd /home/korokororin47_gmail_com/PromptRelay/PromptRelayWorker
+
 python3 src/generator/evolve_item.py \
   --project promptrelay \
   --imagenRegion asia-northeast1 \
@@ -122,10 +124,15 @@ python3 src/generator/evolve_item.py \
   --geminiModel gemini-3-flash-preview \
   --localDataDir /home/korokororin47_gmail_com/PromptRelay/PromptRelayWorker/data \
   --runId run-local-001 \
-  --itemId item-local-001 \
+  --itemId item-local-$(date +%s) \
   --aspectRatio 1:1 \
   --generations 3 \
   --population 8 \
   --parents 3 \
-  --maxVertexRetries 3 > /tmp/evolved.json
+  --maxVertexRetries 3 \
+  --settingsPath src/generator/evolve-settings.json \
+  --saveToPool \
+  --availablePrefix pool/available \
+  > /tmp/evolved.json
+
 ```

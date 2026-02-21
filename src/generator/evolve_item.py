@@ -3,6 +3,8 @@ import argparse
 import base64
 import json
 import random
+import shutil
+import re
 import sys
 import time
 import urllib.error
@@ -17,11 +19,16 @@ from imagen_generate import generate_imagen_base64
 
 READABILITY_CUTOFF_START = 0.55
 READABILITY_CUTOFF_END = 0.70
-PARENT_SUBJECT_LIMIT = 2
 FINAL_PICK_TOP_K = 5
-GENOME_PROMPT = "Create a weird but readable single-subject image concept for a party guessing game."
-REQUIRED_CONSTRAINTS: list[str] = ["no text", "no logos", "no collage", "no extra subjects"]
+GENOME_PROMPT = "Invent diverse, weird but readable visual ingredients for a party guessing game."
+REQUIRED_CONSTRAINTS: list[str] = [
+    "keep one clear subject",
+    "keep the scene readable at a glance",
+    "avoid visual clutter",
+]
 TWIST_TYPES: list[str] = ["material", "scale", "role", "physics", "causality"]
+BRAINSTORM_ROUNDS = 3
+BRAINSTORM_BATCH = 18
 
 
 def clamp01(value: float) -> float:
@@ -35,11 +42,12 @@ def clamp01(value: float) -> float:
 def load_settings(path: str) -> None:
     global READABILITY_CUTOFF_START
     global READABILITY_CUTOFF_END
-    global PARENT_SUBJECT_LIMIT
     global FINAL_PICK_TOP_K
     global GENOME_PROMPT
     global REQUIRED_CONSTRAINTS
     global TWIST_TYPES
+    global BRAINSTORM_ROUNDS
+    global BRAINSTORM_BATCH
 
     raw = Path(path).read_text(encoding="utf-8")
     settings = json.loads(raw)
@@ -48,8 +56,9 @@ def load_settings(path: str) -> None:
 
     READABILITY_CUTOFF_START = float(settings.get("readability_cutoff_start", 0.55))
     READABILITY_CUTOFF_END = float(settings.get("readability_cutoff_end", 0.70))
-    PARENT_SUBJECT_LIMIT = int(settings.get("parent_subject_limit", 2))
     FINAL_PICK_TOP_K = int(settings.get("final_pick_top_k", 5))
+    BRAINSTORM_ROUNDS = int(settings.get("brainstorm_rounds", 3))
+    BRAINSTORM_BATCH = int(settings.get("brainstorm_batch", 18))
 
     genome_prompt = settings.get("genome_prompt")
     if isinstance(genome_prompt, str) and genome_prompt.strip():
@@ -132,6 +141,43 @@ def with_retry(fn, max_retries: int):
             attempt += 1
 
 
+def try_parse_json_text(text: str) -> dict[str, Any] | None:
+    raw = text.strip()
+    candidates = [raw]
+    if raw.startswith("```"):
+        stripped = raw.strip("`")
+        if stripped.startswith("json"):
+            stripped = stripped[4:].strip()
+        candidates.append(stripped)
+
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(raw[first : last + 1])
+
+    # Sometimes model returns escaped JSON as a quoted string.
+    if raw.startswith("\"") and raw.endswith("\""):
+        try:
+            unescaped = json.loads(raw)
+            if isinstance(unescaped, str):
+                candidates.append(unescaped.strip())
+        except json.JSONDecodeError:
+            pass
+
+    for piece in candidates:
+        try:
+            parsed = json.loads(piece)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, str):
+                nested = try_parse_json_text(parsed)
+                if nested is not None:
+                    return nested
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def extract_json_from_gemini_response(payload: dict[str, Any]) -> dict[str, Any]:
     candidates = payload.get("candidates")
     if not isinstance(candidates, list) or not candidates:
@@ -144,114 +190,130 @@ def extract_json_from_gemini_response(payload: dict[str, Any]) -> dict[str, Any]
             continue
         text = part.get("text")
         if isinstance(text, str):
-            try:
-                parsed = json.loads(text)
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                continue
+            parsed = try_parse_json_text(text)
+            if parsed is not None:
+                return parsed
     raise RuntimeError("gemini response missing parseable JSON")
 
 
-def normalize_genome(raw: dict[str, Any]) -> dict[str, Any]:
-    base_scene = str(raw.get("baseScene", "unknown scene"))
-    subject = str(raw.get("subject", "subject"))
-    action = str(raw.get("action", "doing something"))
+def extract_text_from_gemini_response(payload: dict[str, Any]) -> str:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return ""
+    first = candidates[0] if isinstance(candidates[0], dict) else {}
+    content = first.get("content") if isinstance(first.get("content"), dict) else {}
+    parts = content.get("parts") if isinstance(content.get("parts"), list) else []
+    texts: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    return "\n".join(texts)
 
-    style_raw = raw.get("style") if isinstance(raw.get("style"), dict) else {}
-    medium = str(style_raw.get("medium", "photo"))
-    if medium not in ("photo", "illustration"):
-        medium = "photo"
-    style = {
-        "medium": medium,
-        "mood": str(style_raw.get("mood", "mysterious")),
-        "lighting": str(style_raw.get("lighting", "soft daylight")),
+
+def parse_brainstorm_text_fallback(text: str) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "subjects": [],
+        "scenes": [],
+        "actions": [],
+        "moods": [],
+        "lightings": [],
+        "lenses": [],
+        "constraints": [],
+        "style_mediums": [],
+        "twists": [],
     }
-    lens = style_raw.get("lens")
-    if isinstance(lens, str) and lens.strip():
-        style["lens"] = lens.strip()
 
-    comp_raw = raw.get("composition") if isinstance(raw.get("composition"), dict) else {}
-    framing = str(comp_raw.get("framing", "center"))
-    if framing not in ("center", "rule_of_thirds"):
-        framing = "center"
-    composition = {
-        "focus": "single_subject",
-        "framing": framing,
-        "backgroundClarity": "clear",
-    }
+    # Accept lines such as:
+    # subjects: a, b, c
+    # twists: material: glass body | physics: sideways gravity
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        key_raw, value_raw = line.split(":", 1)
+        key = normalize_text(key_raw).replace(" ", "_")
+        value = value_raw.strip()
+        if not value:
+            continue
 
-    twists_raw = raw.get("twist") if isinstance(raw.get("twist"), list) else []
-    twists: list[dict[str, Any]] = []
-    for t in twists_raw[:2]:
+        if key in ("subjects", "scenes", "actions", "moods", "lightings", "lenses", "constraints", "style_mediums"):
+            parts = [v.strip(" -\t") for v in re.split(r"[;,|]", value)]
+            out[key].extend([p for p in parts if p])
+            continue
+
+        if key == "twists":
+            parts = [v.strip(" -\t") for v in re.split(r"[;|]", value)]
+            for p in parts:
+                if not p:
+                    continue
+                if ":" in p:
+                    ttype_raw, desc_raw = p.split(":", 1)
+                    ttype = normalize_text(ttype_raw).replace(" ", "")
+                    if ttype in TWIST_TYPES:
+                        out["twists"].append(
+                            {
+                                "type": ttype,
+                                "description": desc_raw.strip(),
+                                "strengthHint": 1,
+                            }
+                        )
+    return out
+
+
+def normalize_text(v: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", v.lower())).strip()
+
+
+def dedupe_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in values:
+        s = v.strip()
+        if not s:
+            continue
+        key = normalize_text(s)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def dedupe_twists(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for t in values:
         if not isinstance(t, dict):
             continue
-        ttype = str(t.get("type", "material"))
-        if ttype not in TWIST_TYPES:
+        ttype = str(t.get("type", "")).strip()
+        desc = str(t.get("description", "")).strip()
+        if ttype not in TWIST_TYPES or not desc:
             continue
-        description = str(t.get("description", "unexpected behavior"))
-        strength = t.get("strength", 1)
-        strength_num = 2 if int(strength) == 2 else 1
-        twists.append({"type": ttype, "description": description, "strength": strength_num})
-
-    constraints_raw = raw.get("constraints") if isinstance(raw.get("constraints"), list) else []
-    constraints = [str(v) for v in constraints_raw if isinstance(v, str) and v.strip()]
-    if not constraints:
-        constraints = REQUIRED_CONSTRAINTS.copy()
-    for needed in REQUIRED_CONSTRAINTS:
-        if needed not in constraints:
-            constraints.append(needed)
-
-    return {
-        "baseScene": base_scene,
-        "subject": subject,
-        "action": action,
-        "twist": twists,
-        "style": style,
-        "composition": composition,
-        "constraints": constraints,
-    }
+        strength_hint = t.get("strengthHint", t.get("strength", 1))
+        try:
+            strength = 2 if int(strength_hint) == 2 else 1
+        except Exception:  # noqa: BLE001
+            strength = 1
+        key = f"{ttype}|{normalize_text(desc)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"type": ttype, "description": desc, "strength": strength})
+    return out
 
 
-def build_prompt(genome: dict[str, Any]) -> str:
-    twist = genome.get("twist", [])
-    if isinstance(twist, list) and twist:
-        twist_text = ", ".join(f"{t['type']}:{t['description']}(strength={t['strength']})" for t in twist if isinstance(t, dict))
-    else:
-        twist_text = "none"
-    lens = genome.get("style", {}).get("lens") if isinstance(genome.get("style"), dict) else None
-    lens_text = f", lens {lens}" if isinstance(lens, str) and lens else ""
-
-    return ". ".join(
-        [
-            f"Single {genome['subject']} in {genome['baseScene']}",
-            f"Action: {genome['action']}",
-            f"Twist design: {twist_text}",
-            f"Visual style: {genome['style']['medium']}, mood {genome['style']['mood']}, lighting {genome['style']['lighting']}{lens_text}",
-            f"Composition: framing {genome['composition']['framing']}, single_subject focus, clear background",
-            f"Constraints: {', '.join(genome['constraints'])}",
-        ]
-    )
-
-
-def suggest_genome(
+def brainstorm_once(
     *,
     project: str,
     model: str,
-    run_id: str,
-    item_id: str,
-    generation: int,
-    candidate_index: int,
     max_retries: int,
     recent_subjects: list[str],
-    parent_genome: dict[str, Any] | None,
 ) -> dict[str, Any]:
     url = f"https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{model}:generateContent"
-    avoid_subjects = ", ".join(recent_subjects[:8]) if recent_subjects else "none"
-
-    parent_hint = ""
-    if parent_genome is not None:
-        parent_hint = f"Parent genome to mutate lightly: {json.dumps(parent_genome, ensure_ascii=False)}"
+    avoid = ", ".join(recent_subjects[:12]) if recent_subjects else "none"
 
     body = {
         "contents": [
@@ -262,13 +324,10 @@ def suggest_genome(
                         "text": "\n".join(
                             [
                                 GENOME_PROMPT,
-                                "Return only JSON.",
-                                "Create one strange but instantly understandable single-subject concept.",
-                                f"Avoid repeating these recent subjects when possible: {avoid_subjects}",
-                                "Use 0..2 twist entries.",
-                                "Allowed twist types: " + ", ".join(TWIST_TYPES),
-                                "Composition focus must be single_subject and backgroundClarity must be clear.",
-                                parent_hint,
+                                "Brainstorm a large and diverse ingredient pool.",
+                                "Return ONLY JSON.",
+                                f"Avoid reusing these recent subjects when possible: {avoid}",
+                                f"Generate about {BRAINSTORM_BATCH} entries per list.",
                             ]
                         )
                     }
@@ -276,68 +335,255 @@ def suggest_genome(
             }
         ],
         "generationConfig": {
-            "temperature": 0.9,
-            "topP": 0.95,
-            "maxOutputTokens": 512,
+            "temperature": 0.95,
+            "topP": 0.98,
+            "maxOutputTokens": 2048,
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "OBJECT",
-                "required": ["baseScene", "subject", "action", "style", "composition", "constraints"],
+                "required": [
+                    "subjects",
+                    "scenes",
+                    "actions",
+                    "moods",
+                    "lightings",
+                    "lenses",
+                    "constraints",
+                    "twists",
+                    "style_mediums"
+                ],
                 "properties": {
-                    "baseScene": {"type": "STRING"},
-                    "subject": {"type": "STRING"},
-                    "action": {"type": "STRING"},
-                    "twist": {
+                    "subjects": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "scenes": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "actions": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "moods": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "lightings": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "lenses": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "constraints": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "style_mediums": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "twists": {
                         "type": "ARRAY",
                         "items": {
                             "type": "OBJECT",
-                            "required": ["type", "description", "strength"],
+                            "required": ["type", "description"],
                             "properties": {
                                 "type": {"type": "STRING"},
                                 "description": {"type": "STRING"},
-                                "strength": {"type": "INTEGER"},
-                            },
-                        },
-                    },
-                    "style": {
-                        "type": "OBJECT",
-                        "required": ["medium", "mood", "lighting"],
-                        "properties": {
-                            "medium": {"type": "STRING"},
-                            "mood": {"type": "STRING"},
-                            "lighting": {"type": "STRING"},
-                            "lens": {"type": "STRING"},
-                        },
-                    },
-                    "composition": {
-                        "type": "OBJECT",
-                        "required": ["focus", "framing", "backgroundClarity"],
-                        "properties": {
-                            "focus": {"type": "STRING"},
-                            "framing": {"type": "STRING"},
-                            "backgroundClarity": {"type": "STRING"},
-                        },
-                    },
-                    "constraints": {"type": "ARRAY", "items": {"type": "STRING"}},
-                },
-            },
-        },
+                                "strengthHint": {"type": "INTEGER"}
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     raw = with_retry(lambda: call_vertex_json(url, body), max_retries)
-    parsed = extract_json_from_gemini_response(raw)
-    genome = normalize_genome(parsed)
+    try:
+        return extract_json_from_gemini_response(raw)
+    except Exception:
+        # Fallback with simpler output contract when schema mode still returns non-JSON text.
+        fallback_body = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": "\n".join(
+                                [
+                                    GENOME_PROMPT,
+                                    "Return STRICT JSON object only, no markdown.",
+                                    f"Avoid these recent subjects when possible: {avoid}",
+                                    f"Generate about {BRAINSTORM_BATCH} entries per list.",
+                                    "Required keys:",
+                                    "subjects, scenes, actions, moods, lightings, lenses, constraints, style_mediums, twists",
+                                    "twists items must include: type, description, strengthHint",
+                                ]
+                            )
+                        }
+                    ],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.9,
+                "topP": 0.98,
+                "maxOutputTokens": 2048,
+                "responseMimeType": "application/json",
+            },
+        }
+        raw_fallback = with_retry(lambda: call_vertex_json(url, fallback_body), max_retries)
+        try:
+            return extract_json_from_gemini_response(raw_fallback)
+        except Exception:
+            # Last fallback: accept plain text lists and parse heuristically.
+            text_body = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": "\n".join(
+                                    [
+                                        GENOME_PROMPT,
+                                        "Return plain text lines in this exact format:",
+                                        "subjects: ...",
+                                        "scenes: ...",
+                                        "actions: ...",
+                                        "moods: ...",
+                                        "lightings: ...",
+                                        "lenses: ...",
+                                        "style_mediums: photo, illustration",
+                                        "constraints: ...",
+                                        "twists: type: description | type: description",
+                                        f"Avoid these recent subjects: {avoid}",
+                                    ]
+                                )
+                            }
+                        ],
+                    }
+                ],
+                "generationConfig": {"temperature": 0.7, "topP": 0.95, "maxOutputTokens": 1024},
+            }
+            raw_text = with_retry(lambda: call_vertex_json(url, text_body), max_retries)
+            text = extract_text_from_gemini_response(raw_text)
+            parsed = parse_brainstorm_text_fallback(text)
+            return parsed
+
+
+def build_brainstorm_pool(
+    *,
+    project: str,
+    model: str,
+    run_id: str,
+    item_id: str,
+    max_retries: int,
+    recent_subjects: list[str],
+) -> dict[str, Any]:
+    agg: dict[str, Any] = {
+        "subjects": [],
+        "scenes": [],
+        "actions": [],
+        "moods": [],
+        "lightings": [],
+        "lenses": [],
+        "constraints": [],
+        "style_mediums": [],
+        "twists": [],
+    }
+
+    for i in range(max(1, BRAINSTORM_ROUNDS)):
+        try:
+            data = brainstorm_once(project=project, model=model, max_retries=max_retries, recent_subjects=recent_subjects)
+        except Exception as error:  # noqa: BLE001
+            log_step(run_id, item_id, "brainstorm_round_failed", round=i, error=str(error))
+            continue
+        for key in ("subjects", "scenes", "actions", "moods", "lightings", "lenses", "constraints", "style_mediums"):
+            values = data.get(key)
+            if isinstance(values, list):
+                agg[key].extend([str(v) for v in values if isinstance(v, str)])
+        twists = data.get("twists")
+        if isinstance(twists, list):
+            agg["twists"].extend(twists)
+        log_step(run_id, item_id, "brainstorm_round_done", round=i, subjects=len(agg["subjects"]))
+
+    for key in ("subjects", "scenes", "actions", "moods", "lightings", "lenses", "constraints", "style_mediums"):
+        agg[key] = dedupe_strings(agg[key])
+
+    agg["twists"] = dedupe_twists(agg["twists"])
+
+    # enforce required minimum entries
+    if not agg["style_mediums"]:
+        agg["style_mediums"] = ["photo", "illustration"]
+    agg["style_mediums"] = [m for m in agg["style_mediums"] if m in ("photo", "illustration")] or ["photo", "illustration"]
+
+    agg["constraints"] = dedupe_strings(agg["constraints"] + REQUIRED_CONSTRAINTS)
+
+    for key in ("subjects", "scenes", "actions", "moods", "lightings"):
+        if not agg[key]:
+            raise RuntimeError(f"brainstorm pool missing required key: {key}")
 
     log_step(
         run_id,
         item_id,
-        "genome_suggested",
-        generation=generation,
-        candidateIndex=candidate_index,
-        subject=genome.get("subject", ""),
-        baseScene=genome.get("baseScene", ""),
+        "brainstorm_pool_ready",
+        subjects=len(agg["subjects"]),
+        scenes=len(agg["scenes"]),
+        actions=len(agg["actions"]),
+        twists=len(agg["twists"]),
     )
+    return agg
+
+
+def choose_with_avoid(values: list[str], avoid: list[str]) -> str:
+    normalized_avoid = {normalize_text(v) for v in avoid}
+    filtered = [v for v in values if normalize_text(v) not in normalized_avoid]
+    if filtered:
+        return random.choice(filtered)
+    return random.choice(values)
+
+
+def compose_genome_from_pool(pool: dict[str, Any], recent_subjects: list[str]) -> dict[str, Any]:
+    subject = choose_with_avoid(pool["subjects"], recent_subjects)
+    scene = random.choice(pool["scenes"])
+    action = random.choice(pool["actions"])
+
+    twist_count = 1 if random.random() < 0.75 else (2 if random.random() < 0.35 else 0)
+    twists = pool["twists"].copy()
+    random.shuffle(twists)
+    twist = twists[: min(twist_count, len(twists))]
+
+    medium = random.choice(pool["style_mediums"])
+    mood = random.choice(pool["moods"])
+    lighting = random.choice(pool["lightings"])
+    lens = random.choice(pool["lenses"]) if pool["lenses"] and random.random() < 0.6 else None
+
+    framing = "center" if random.random() < 0.5 else "rule_of_thirds"
+
+    sampled_constraints = random.sample(pool["constraints"], k=min(2, len(pool["constraints"])))
+    constraints = dedupe_strings(sampled_constraints + REQUIRED_CONSTRAINTS)
+
+    genome = {
+        "baseScene": scene,
+        "subject": subject,
+        "action": action,
+        "twist": [{"type": t["type"], "description": t["description"], "strength": t["strength"]} for t in twist],
+        "style": {
+            "medium": medium,
+            "mood": mood,
+            "lighting": lighting,
+            **({"lens": lens} if lens else {}),
+        },
+        "composition": {
+            "focus": "single_subject",
+            "framing": framing,
+            "backgroundClarity": "clear",
+        },
+        "constraints": constraints,
+    }
     return genome
+
+
+def build_prompt(genome: dict[str, Any]) -> str:
+    twists = genome.get("twist", [])
+    if isinstance(twists, list) and twists:
+        twist_text = ", ".join(f"{t['type']}:{t['description']}(strength={t['strength']})" for t in twists if isinstance(t, dict))
+    else:
+        twist_text = "none"
+
+    lens = genome.get("style", {}).get("lens") if isinstance(genome.get("style"), dict) else None
+    lens_text = f", lens {lens}" if isinstance(lens, str) and lens else ""
+
+    return ". ".join(
+        [
+            f"Single {genome['subject']} in {genome['baseScene']}",
+            f"Action: {genome['action']}",
+            f"Twist design: {twist_text}",
+            f"Visual style: {genome['style']['medium']}, mood {genome['style']['mood']}, lighting {genome['style']['lighting']}{lens_text}",
+            f"Composition: framing {genome['composition']['framing']}, single_subject focus, clear background",
+            "Keep the image clean and instantly understandable, with one obvious focal point.",
+            "Use natural details and coherent scene logic so the weirdness feels intentional rather than random.",
+        ]
+    )
 
 
 def score_with_gemini(*, project: str, model: str, prompt: str, image_base64: str, max_retries: int) -> dict[str, Any]:
@@ -475,30 +721,6 @@ def blended_fitness(readability: float, twist: float, aesthetic: float, novelty:
     return clamp01(0.40 * readability + 0.25 * twist + 0.15 * aesthetic + 0.20 * novelty)
 
 
-def select_diverse_parents(parent_pool: list[dict[str, Any]], parent_count: int) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    subject_count: dict[str, int] = {}
-    for candidate in parent_pool:
-        genome = candidate["genome"]
-        subject = str(genome.get("subject", ""))
-        current = subject_count.get(subject, 0)
-        if current >= PARENT_SUBJECT_LIMIT:
-            continue
-        selected.append(genome)
-        subject_count[subject] = current + 1
-        if len(selected) >= parent_count:
-            return selected
-
-    for candidate in parent_pool:
-        if len(selected) >= parent_count:
-            break
-        genome = candidate["genome"]
-        if genome in selected:
-            continue
-        selected.append(genome)
-    return selected
-
-
 def rarity_bonus(value: str, freq: dict[str, int], total: int) -> float:
     count = freq.get(value, 1)
     return clamp01(1.0 - (count - 1) / max(1, total - 1))
@@ -507,6 +729,29 @@ def rarity_bonus(value: str, freq: dict[str, int], total: int) -> float:
 def save_base64_png(base64_png: str, file_path: Path) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(base64.b64decode(base64_png))
+
+
+def save_to_available_pool(
+    *,
+    local_data_dir: str,
+    available_prefix: str,
+    item_id: str,
+    selected_image_path: str,
+    meta: dict[str, Any],
+) -> str:
+    clean_prefix = available_prefix.strip("/").strip()
+    if not clean_prefix:
+        raise RuntimeError("available prefix must not be empty")
+
+    target_dir = Path(local_data_dir) / clean_prefix / item_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    final_png = target_dir / "final.png"
+    meta_json = target_dir / "meta.json"
+
+    shutil.copyfile(selected_image_path, final_png)
+    meta_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(target_dir)
 
 
 def main() -> int:
@@ -524,6 +769,8 @@ def main() -> int:
     parser.add_argument("--parents", type=int, required=True)
     parser.add_argument("--maxVertexRetries", type=int, required=True)
     parser.add_argument("--settingsPath", required=True)
+    parser.add_argument("--saveToPool", action="store_true")
+    parser.add_argument("--availablePrefix", default="pool/available")
     args = parser.parse_args()
 
     load_settings(args.settingsPath)
@@ -535,8 +782,10 @@ def main() -> int:
         population=args.population,
         parents=args.parents,
         aspectRatio=args.aspectRatio,
+        brainstormRounds=BRAINSTORM_ROUNDS,
         settingsPath=args.settingsPath,
     )
+
     best_overall: dict[str, Any] | None = None
     all_candidates: list[dict[str, Any]] = []
     prompt_history: list[dict[str, Any]] = []
@@ -547,20 +796,16 @@ def main() -> int:
         readability_cutoff = READABILITY_CUTOFF_START + (READABILITY_CUTOFF_END - READABILITY_CUTOFF_START) * progress
         log_step(args.runId, args.itemId, "generation_start", generation=generation, readabilityCutoff=round(readability_cutoff, 3))
 
-        genomes: list[dict[str, Any]] = []
-        for i in range(args.population):
-            genome = suggest_genome(
-                project=args.project,
-                model=args.geminiModel,
-                run_id=args.runId,
-                item_id=args.itemId,
-                generation=generation,
-                candidate_index=i,
-                max_retries=args.maxVertexRetries,
-                recent_subjects=recent_subjects,
-                parent_genome=None,
-            )
-            genomes.append(genome)
+        pool = build_brainstorm_pool(
+            project=args.project,
+            model=args.geminiModel,
+            run_id=args.runId,
+            item_id=args.itemId,
+            max_retries=args.maxVertexRetries,
+            recent_subjects=recent_subjects,
+        )
+
+        genomes = [compose_genome_from_pool(pool, recent_subjects) for _ in range(args.population)]
 
         novelty_refs = genomes
         seen_signatures: set[str] = set()
@@ -610,7 +855,7 @@ def main() -> int:
             seen_signatures.add(genome_signature(genome))
 
             recent_subjects.insert(0, str(genome.get("subject", "")))
-            recent_subjects = recent_subjects[:16]
+            recent_subjects = recent_subjects[:24]
 
             prompt_history.append({"generation": generation, "candidateIndex": i, "prompt": prompt, "scores": scores})
             log_step(
@@ -674,10 +919,6 @@ def main() -> int:
         if best_overall is None or generation_best["scores"]["fitness"] > best_overall["scores"]["fitness"]:
             best_overall = generation_best
 
-        parent_pool = ranked_survivors if ranked_survivors else ranked_all
-        parent_count = max(1, min(args.parents, len(parent_pool)))
-        selected_parents = select_diverse_parents(parent_pool, parent_count)
-
         log_step(
             args.runId,
             args.itemId,
@@ -685,7 +926,6 @@ def main() -> int:
             generation=generation,
             candidates=len(candidates),
             survivors=len(survivors),
-            selectedParents=len(selected_parents),
         )
 
     if best_overall is None:
@@ -728,6 +968,17 @@ def main() -> int:
         "tempImagePath": best_temp_path,
         "promptHistory": prompt_history,
     }
+
+    if args.saveToPool:
+        saved_dir = save_to_available_pool(
+            local_data_dir=args.localDataDir,
+            available_prefix=args.availablePrefix,
+            item_id=args.itemId,
+            selected_image_path=best_temp_path,
+            meta=result,
+        )
+        log_step(args.runId, args.itemId, "saved_to_pool", availableDir=saved_dir)
+
     log_step(args.runId, args.itemId, "done")
     sys.stdout.write(json.dumps(result))
     return 0
