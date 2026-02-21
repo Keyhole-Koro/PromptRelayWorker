@@ -731,6 +731,12 @@ def save_base64_png(base64_png: str, file_path: Path) -> None:
     file_path.write_bytes(base64.b64decode(base64_png))
 
 
+def default_runs_dir(local_data_dir: str) -> Path:
+    data_dir = Path(local_data_dir).resolve()
+    worker_dir = data_dir.parent if data_dir.name == "data" else data_dir
+    return worker_dir.parent / "PromptRelayWorker_runs"
+
+
 def save_to_available_pool(
     *,
     local_data_dir: str,
@@ -769,9 +775,11 @@ def main() -> int:
     parser.add_argument("--parents", type=int, required=True)
     parser.add_argument("--maxVertexRetries", type=int, required=True)
     parser.add_argument("--settingsPath", required=True)
+    parser.add_argument("--runsDir", default="")
     parser.add_argument("--saveToPool", action="store_true")
     parser.add_argument("--availablePrefix", default="pool/available")
     args = parser.parse_args()
+    runs_dir = Path(args.runsDir).resolve() if args.runsDir else default_runs_dir(args.localDataDir)
 
     load_settings(args.settingsPath)
     log_step(
@@ -784,6 +792,7 @@ def main() -> int:
         aspectRatio=args.aspectRatio,
         brainstormRounds=BRAINSTORM_ROUNDS,
         settingsPath=args.settingsPath,
+        runsDir=str(runs_dir),
     )
 
     best_overall: dict[str, Any] | None = None
@@ -826,7 +835,7 @@ def main() -> int:
                 args.maxVertexRetries,
             )
 
-            temp_image_path = Path(args.localDataDir) / "runs" / args.runId / candidate_id / "candidate.png"
+            temp_image_path = runs_dir / args.runId / candidate_id / "candidate.png"
             save_base64_png(image_base64, temp_image_path)
             (temp_image_path.parent / "prompt.txt").write_text(prompt, encoding="utf-8")
 

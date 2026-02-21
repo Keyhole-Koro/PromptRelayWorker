@@ -83,8 +83,7 @@ export type GenerateResponse = {
   topic: {
     imageUri: string;
     signedUrl: string;
-    imageBase64: string;
-    mimeType: string;
+    imageUrl: string;
     prompt: string;
     genome: Genome;
     scores: ScoreBreakdown;

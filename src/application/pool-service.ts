@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { config } from "../config/app-config.js";
 import type { AspectRatio, EvolveBudget, GenerateRequest, GenerateResponse, PrewarmRequest, PrewarmResponse } from "../domain/types.js";
 import { evolveOneItem } from "../generator/evolution.js";
@@ -90,18 +89,13 @@ export async function generateFromPool(input: GenerateRequest): Promise<Generate
   const signStarted = nowMs();
   const signedUrl = await signGsUri(moved.usedImageUri);
   const signMs = elapsedMs(signStarted);
-
-  const imageReadStarted = nowMs();
-  const imageBuffer = await readFile(moved.usedImageUri);
-  const imageBase64 = imageBuffer.toString("base64");
-  const imageReadMs = elapsedMs(imageReadStarted);
+  const imageUrl = `/v1/topic/image/${encodeURIComponent(moved.itemId)}`;
 
   return {
     topic: {
       imageUri: moved.usedImageUri,
       signedUrl,
-      imageBase64,
-      mimeType: "image/png",
+      imageUrl,
       prompt: moved.meta.prompt,
       genome: moved.meta.genome,
       scores: moved.meta.scores,
@@ -109,7 +103,7 @@ export async function generateFromPool(input: GenerateRequest): Promise<Generate
     itemId: moved.itemId,
     timingsMs: {
       total: elapsedMs(started),
-      gcs: storeMs + imageReadMs,
+      gcs: storeMs,
       sign: signMs,
     },
   };
