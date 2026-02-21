@@ -1,0 +1,6 @@
+{
+  "RUN_VERTEX_TEST": "1",
+  "GOOGLE_CLOUD_PROJECT": "your-project-id",
+  "GOOGLE_CLOUD_LOCATION": "us-central1",
+  "GEMINI_FLASH_MODEL": "gemini-3.0-flash"
+}
