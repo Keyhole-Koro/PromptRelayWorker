@@ -1,6 +1,8 @@
 const METADATA_TOKEN_URL =
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
+import { config } from "../../config/app-config.js";
+
 export type VertexEmbeddingInput = {
   imagePng: Buffer;
   promptText?: string;
@@ -15,12 +17,12 @@ function envEnabled(): boolean {
   return process.env.VERTEX_ENABLED !== "0";
 }
 
-function projectId(): string | undefined {
-  return process.env.VERTEX_PROJECT_ID ?? process.env.GOOGLE_CLOUD_PROJECT;
+function projectId(): string {
+  return config.GOOGLE_CLOUD_PROJECT;
 }
 
 function location(): string {
-  return process.env.VERTEX_LOCATION ?? "asia-northeast1";
+  return process.env.VERTEX_LOCATION ?? config.IMAGEN_REGION;
 }
 
 function compactPrompt(promptText: string | undefined): string {
@@ -73,9 +75,6 @@ export async function getVertexImageEmbedding(input: VertexEmbeddingInput): Prom
   }
 
   const project = projectId();
-  if (!project) {
-    return undefined;
-  }
 
   const fetcher = input.fetcher ?? fetch;
   const token = await accessToken(fetcher);

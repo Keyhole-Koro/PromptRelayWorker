@@ -53,7 +53,7 @@ const baseConfig = {
   DEFAULT_ASPECT_RATIO: "1:1" as AspectRatio,
   MAX_MOVE_RETRIES: 8,
   MAX_VERTEX_RETRIES: 3,
-  GEMINI_MODEL: "gemini-3-flash-preview",
+  GEMINI_MODEL: "gemini-3-pro-preview",
   MULTIMODAL_EMBEDDING_MODEL: "multimodalembedding@001",
   IMAGEN_MODEL: "imagen-4.0-generate-001",
   TEXT_EMBEDDING_MODEL: "text-embedding-005",
