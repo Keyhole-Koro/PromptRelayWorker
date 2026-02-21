@@ -1,0 +1,10 @@
+{
+  "inherit_across_generations": false,
+  "readability_cutoff_start": 0.55,
+  "readability_cutoff_end": 0.7,
+  "parent_subject_limit": 2,
+  "final_pick_top_k": 5,
+  "genome_prompt": "Invent a fresh, surprising but immediately readable single-subject visual concept suitable for a party guessing game. Prioritize clarity first, then weirdness. Avoid repeating obvious cliches.",
+  "required_constraints": ["no text", "no logos", "no collage", "no extra subjects"],
+  "twist_types": ["material", "scale", "role", "physics", "causality"]
+}

@@ -1,0 +1,287 @@
+openapi: 3.1.0
+info:
+  title: PromptRelay Worker API
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:8091
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+  /worker:
+    get:
+      summary: Visual debug page (HTML)
+      responses:
+        '200':
+          description: HTML page
+  /v1/pool/prewarm:
+    post:
+      summary: Pre-generate pool items
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrewarmRequest'
+      responses:
+        '200':
+          description: Prewarm result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrewarmResponse'
+  /generate:
+    post:
+      summary: Acquire one unused item from pool and move to used
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: Generated topic from pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+        '503':
+          description: Pool empty
+  /v1/topic/generate:
+    post:
+      summary: Alias of /generate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateRequest'
+      responses:
+        '200':
+          description: Generated topic from pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateResponse'
+  /v1/debug/score:
+    post:
+      summary: Score an uploaded image with prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DebugScoreRequest'
+      responses:
+        '200':
+          description: Score response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebugScoreResponse'
+  /v1/debug/generate:
+    post:
+      summary: Generate one debug image from prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DebugGenerateRequest'
+      responses:
+        '200':
+          description: Debug generated image
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebugGenerateResponse'
+  /v1/debug/prompt-score:
+    post:
+      summary: Compare two prompts via text embeddings cosine similarity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PromptScoreRequest'
+      responses:
+        '200':
+          description: Prompt similarity score
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PromptScoreResponse'
+components:
+  schemas:
+    AspectRatio:
+      type: string
+      enum: ["1:1", "16:9"]
+    EvolveBudget:
+      type: object
+      properties:
+        generations: { type: integer, minimum: 1 }
+        population: { type: integer, minimum: 1 }
+        parents: { type: integer, minimum: 1 }
+    PrewarmRequest:
+      type: object
+      properties:
+        count: { type: integer, minimum: 1, maximum: 200 }
+        budget: { $ref: '#/components/schemas/EvolveBudget' }
+        aspectRatio: { $ref: '#/components/schemas/AspectRatio' }
+    Twist:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [material, scale, role, physics, causality]
+        description: { type: string }
+        strength:
+          type: integer
+          enum: [1, 2]
+      required: [type, description, strength]
+    Genome:
+      type: object
+      properties:
+        baseScene: { type: string }
+        subject: { type: string }
+        action: { type: string }
+        twist:
+          type: array
+          maxItems: 2
+          items: { $ref: '#/components/schemas/Twist' }
+        style:
+          type: object
+          properties:
+            medium: { type: string, enum: [photo, illustration] }
+            mood: { type: string }
+            lighting: { type: string }
+            lens: { type: string }
+          required: [medium, mood, lighting]
+        composition:
+          type: object
+          properties:
+            focus: { type: string, enum: [single_subject] }
+            framing: { type: string, enum: [center, rule_of_thirds] }
+            backgroundClarity: { type: string, enum: [clear] }
+          required: [focus, framing, backgroundClarity]
+        constraints:
+          type: array
+          items: { type: string }
+      required: [baseScene, subject, action, twist, style, composition, constraints]
+    ScoreBreakdown:
+      type: object
+      properties:
+        readability: { type: number, minimum: 0, maximum: 1 }
+        twist: { type: number, minimum: 0, maximum: 1 }
+        aesthetic: { type: number, minimum: 0, maximum: 1 }
+        fitness: { type: number, minimum: 0, maximum: 1 }
+        labels:
+          type: object
+          properties:
+            scene: { type: string }
+            subject: { type: string }
+            action: { type: string }
+        flags:
+          type: array
+          items: { type: string }
+        short_reason: { type: string }
+      required: [readability, twist, aesthetic, fitness, labels, flags, short_reason]
+    PrewarmItem:
+      type: object
+      properties:
+        itemId: { type: string }
+        gcsPrefix: { type: string }
+      required: [itemId, gcsPrefix]
+    PrewarmResponse:
+      type: object
+      properties:
+        created: { type: integer }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/PrewarmItem' }
+        timingsMs:
+          type: object
+          additionalProperties: { type: number }
+      required: [created, items, timingsMs]
+    GenerateRequest:
+      type: object
+      properties:
+        aspectRatio: { $ref: '#/components/schemas/AspectRatio' }
+    TopicPayload:
+      type: object
+      properties:
+        imageUri: { type: string }
+        signedUrl: { type: string }
+        prompt: { type: string }
+        genome: { $ref: '#/components/schemas/Genome' }
+        scores: { $ref: '#/components/schemas/ScoreBreakdown' }
+      required: [imageUri, signedUrl, prompt, genome, scores]
+    GenerateResponse:
+      type: object
+      properties:
+        topic: { $ref: '#/components/schemas/TopicPayload' }
+        itemId: { type: string }
+        timingsMs:
+          type: object
+          properties:
+            total: { type: number }
+            gcs: { type: number }
+            sign: { type: number }
+          required: [total, gcs, sign]
+      required: [topic, itemId, timingsMs]
+    DebugScoreRequest:
+      type: object
+      properties:
+        prompt: { type: string }
+        imageBase64: { type: string }
+        mimeType: { type: string }
+        baseScene: { type: string }
+        subject: { type: string }
+        action: { type: string }
+      required: [prompt, imageBase64, mimeType]
+    DebugScoreResponse:
+      type: object
+      properties:
+        runId: { type: string }
+        prompt: { type: string }
+        genome: { $ref: '#/components/schemas/Genome' }
+        scores: { $ref: '#/components/schemas/ScoreBreakdown' }
+      required: [runId, prompt, genome, scores]
+    DebugGenerateRequest:
+      type: object
+      properties:
+        prompt: { type: string }
+        aspectRatio: { $ref: '#/components/schemas/AspectRatio' }
+      required: [prompt]
+    DebugGenerateResponse:
+      type: object
+      properties:
+        runId: { type: string }
+        itemId: { type: string }
+        imageUri: { type: string }
+        signedUrl: { type: string }
+      required: [runId, itemId, imageUri, signedUrl]
+    PromptScoreRequest:
+      type: object
+      properties:
+        promptA: { type: string }
+        promptB: { type: string }
+      required: [promptA, promptB]
+    PromptScoreResponse:
+      type: object
+      properties:
+        runId: { type: string }
+        promptA: { type: string }
+        promptB: { type: string }
+        cosine: { type: number, minimum: -1, maximum: 1 }
+        score01: { type: number, minimum: 0, maximum: 1 }
+      required: [runId, promptA, promptB, cosine, score01]

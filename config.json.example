@@ -1,0 +1,8 @@
+{
+  "note": "This worker uses src/config.ts as the primary config. Environment variables are optional overrides.",
+  "required": [
+    "GOOGLE_CLOUD_PROJECT",
+    "IMAGEN_REGION",
+    "GCS_BUCKET"
+  ]
+}
