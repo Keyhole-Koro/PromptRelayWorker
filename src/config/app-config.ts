@@ -23,6 +23,7 @@ const ConfigSchema = z.object({
   MAX_VERTEX_RETRIES: z.number().int().positive(),
   GEMINI_MODEL: z.string().min(1),
   IMAGEN_MODEL: z.string().min(1),
+  TEXT_EMBEDDING_MODEL: z.string().min(1),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -49,6 +50,7 @@ const baseConfig = {
   MAX_VERTEX_RETRIES: 3,
   GEMINI_MODEL: "gemini-3-flash-preview",
   IMAGEN_MODEL: "imagen-4.0-generate-001",
+  TEXT_EMBEDDING_MODEL: "text-embedding-005",
 } satisfies Config;
 
 function asInt(name: string): number | undefined {
@@ -83,6 +85,7 @@ function envOverride(): Partial<Config> {
     MAX_VERTEX_RETRIES: asInt("MAX_VERTEX_RETRIES"),
     GEMINI_MODEL: process.env.GEMINI_MODEL,
     IMAGEN_MODEL: process.env.IMAGEN_MODEL,
+    TEXT_EMBEDDING_MODEL: process.env.TEXT_EMBEDDING_MODEL,
   };
 }
 

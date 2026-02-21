@@ -1,12 +1,16 @@
 import express from "express";
 import { z } from "zod";
-import { config } from "../config/app-config.js";
-import { log } from "../observability/logger.js";
 import { generateFromPool, prewarmPool } from "../application/pool-service.js";
-import { withTimeout } from "../shared/utils.js";
+import { config } from "../config/app-config.js";
+import type { Genome } from "../domain/types.js";
+import { generateImagenToGcs } from "../generator/vertex-imagen-generator.js";
+import { acquireAndMoveOneAvailableItem, signGsUri } from "../infra/storage/pool-store.js";
+import { log } from "../observability/logger.js";
+import { evaluateWithGeminiInline } from "../scorer/vertex-gemini-scorer.js";
+import { randomId, withTimeout } from "../shared/utils.js";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "15mb" }));
 
 const prewarmSchema = z.object({
   count: z.number().int().positive().max(200).optional(),
@@ -24,8 +28,328 @@ const generateSchema = z.object({
   aspectRatio: z.enum(["1:1", "16:9"]).optional(),
 });
 
+const debugGenerateSchema = z.object({
+  prompt: z.string().min(1),
+  aspectRatio: z.enum(["1:1", "16:9"]).optional(),
+});
+
+const debugScoreSchema = z.object({
+  prompt: z.string().min(1),
+  imageBase64: z.string().min(1),
+  mimeType: z.string().min(1),
+  baseScene: z.string().min(1).optional(),
+  subject: z.string().min(1).optional(),
+  action: z.string().min(1).optional(),
+});
+
+function buildDebugGenome(input: z.infer<typeof debugScoreSchema>): Genome {
+  return {
+    baseScene: input.baseScene ?? "test scene",
+    subject: input.subject ?? "single subject",
+    action: input.action ?? "acting",
+    twist: [],
+    style: {
+      medium: "photo",
+      mood: "neutral",
+      lighting: "natural light",
+    },
+    composition: {
+      focus: "single_subject",
+      framing: "center",
+      backgroundClarity: "clear",
+    },
+    constraints: ["no text", "no logos", "no extra subjects"],
+  };
+}
+
+function workerPageHtml(): string {
+  return `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Worker Visual Debug</title>
+  <style>
+    :root {
+      --bg: #f4f6fb;
+      --card: #ffffff;
+      --ink: #10203a;
+      --accent: #0f5ef7;
+      --muted: #60708a;
+      --line: #d6deea;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(1200px 700px at 20% -20%, #dce7ff 0%, var(--bg) 50%);
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 24px auto;
+      padding: 0 16px 32px;
+    }
+    h1 { margin: 8px 0 20px; font-size: 30px; }
+    .grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 10px 22px rgba(16, 32, 58, 0.08);
+    }
+    label { display: block; font-weight: 600; margin-top: 8px; }
+    input, textarea, select, button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      margin-top: 6px;
+      font: inherit;
+      background: #fff;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    button {
+      margin-top: 12px;
+      cursor: pointer;
+      border: 0;
+      background: linear-gradient(120deg, #0f5ef7, #2782ff);
+      color: #fff;
+      font-weight: 700;
+    }
+    .note { color: var(--muted); font-size: 13px; }
+    .img {
+      margin-top: 10px;
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #f8fbff;
+    }
+    pre {
+      background: #0d1a2e;
+      color: #d8e6ff;
+      padding: 10px;
+      border-radius: 10px;
+      overflow: auto;
+      min-height: 120px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Worker Visual Debug (/worker)</h1>
+    <div class="grid">
+      <section class="card">
+        <h2>1) 画像を採点 (Gemini Scorer)</h2>
+        <p class="note">画像ファイルとプロンプトを送信して score を確認します。</p>
+        <label>画像</label>
+        <input id="scoreFile" type="file" accept="image/*" />
+        <label>プロンプト</label>
+        <textarea id="scorePrompt" placeholder="A tiny robot chef in a ramen shop"></textarea>
+        <button id="scoreBtn" type="button">スコア実行</button>
+        <img id="scorePreview" class="img" alt="uploaded preview" />
+        <pre id="scoreOut"></pre>
+      </section>
+
+      <section class="card">
+        <h2>2) 画像生成 (Imagen Generator)</h2>
+        <p class="note">プロンプトから1枚生成して表示します。</p>
+        <label>プロンプト</label>
+        <textarea id="genPrompt" placeholder="A cat detective in Tokyo rain"></textarea>
+        <label>アスペクト比</label>
+        <select id="genAspect">
+          <option value="1:1">1:1</option>
+          <option value="16:9">16:9</option>
+        </select>
+        <button id="genBtn" type="button">画像生成</button>
+        <img id="genImg" class="img" alt="generated image" />
+        <pre id="genOut"></pre>
+      </section>
+
+      <section class="card">
+        <h2>3) プール消費 (/generate)</h2>
+        <p class="note">available から1つ取り出し、used に移動した結果を確認します。</p>
+        <label>アスペクト比</label>
+        <select id="poolAspect">
+          <option value="1:1">1:1</option>
+          <option value="16:9">16:9</option>
+        </select>
+        <button id="poolBtn" type="button">/generate 実行</button>
+        <img id="poolImg" class="img" alt="pooled image" />
+        <pre id="poolOut"></pre>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+
+    async function fileToPayload(file) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const raw = String(dataUrl);
+      const parts = raw.split(',');
+      if (parts.length < 2) throw new Error('invalid data url');
+      const meta = parts[0];
+      const imageBase64 = parts[1];
+      const m = /data:(.*);base64/.exec(meta);
+      const mimeType = m ? m[1] : 'image/png';
+      return { imageBase64, mimeType, preview: raw };
+    }
+
+    byId('scoreBtn').addEventListener('click', async () => {
+      const out = byId('scoreOut');
+      const img = byId('scorePreview');
+      out.textContent = 'running...';
+      try {
+        const file = byId('scoreFile').files[0];
+        if (!file) throw new Error('画像ファイルを選択してください');
+        const payload = await fileToPayload(file);
+        img.src = payload.preview;
+        const res = await fetch('/v1/debug/score', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            prompt: byId('scorePrompt').value || 'test prompt',
+            imageBase64: payload.imageBase64,
+            mimeType: payload.mimeType,
+          }),
+        });
+        const json = await res.json();
+        out.textContent = JSON.stringify(json, null, 2);
+      } catch (e) {
+        out.textContent = String(e);
+      }
+    });
+
+    byId('genBtn').addEventListener('click', async () => {
+      const out = byId('genOut');
+      const img = byId('genImg');
+      out.textContent = 'running...';
+      try {
+        const res = await fetch('/v1/debug/generate', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            prompt: byId('genPrompt').value || 'test prompt',
+            aspectRatio: byId('genAspect').value,
+          }),
+        });
+        const json = await res.json();
+        if (json?.signedUrl) img.src = json.signedUrl;
+        out.textContent = JSON.stringify(json, null, 2);
+      } catch (e) {
+        out.textContent = String(e);
+      }
+    });
+
+    byId('poolBtn').addEventListener('click', async () => {
+      const out = byId('poolOut');
+      const img = byId('poolImg');
+      out.textContent = 'running...';
+      try {
+        const res = await fetch('/generate', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ aspectRatio: byId('poolAspect').value }),
+        });
+        const json = await res.json();
+        if (json?.topic?.signedUrl) img.src = json.topic.signedUrl;
+        out.textContent = JSON.stringify(json, null, 2);
+      } catch (e) {
+        out.textContent = String(e);
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
 app.get("/healthz", (_req, res) => {
   res.status(200).type("text/plain; charset=utf-8").send("ok");
+});
+
+app.get("/worker", (_req, res) => {
+  res.status(200).type("text/html; charset=utf-8").send(workerPageHtml());
+});
+
+app.get("/worker/", (_req, res) => {
+  res.status(200).type("text/html; charset=utf-8").send(workerPageHtml());
+});
+
+app.post("/v1/debug/score", async (req, res) => {
+  const parsed = debugScoreSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  const runId = randomId("debug-score");
+  const genome = buildDebugGenome(parsed.data);
+  try {
+    const scores = await withTimeout(
+      evaluateWithGeminiInline({
+        imageBase64: parsed.data.imageBase64,
+        mimeType: parsed.data.mimeType,
+        prompt: parsed.data.prompt,
+        genome,
+        runId,
+        generation: 0,
+        candidateIndex: 0,
+      }),
+      config.REQUEST_TIMEOUT_MS,
+      "request timeout",
+    );
+    res.status(200).json({ runId, prompt: parsed.data.prompt, genome, scores });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("error", "debug_score_error", { runId, message });
+    res.status(500).json({ error: message, runId });
+  }
+});
+
+app.post("/v1/debug/generate", async (req, res) => {
+  const parsed = debugGenerateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  const runId = randomId("debug-generate");
+  const itemId = randomId("item");
+  const aspectRatio = parsed.data.aspectRatio ?? "1:1";
+  const storageUri = `gs://${config.GCS_BUCKET}/debug/generated/${itemId}/`;
+
+  try {
+    const imageUri = await withTimeout(
+      generateImagenToGcs({
+        prompt: parsed.data.prompt,
+        aspectRatio,
+        storageUri,
+        runId,
+        generation: 0,
+        candidateIndex: 0,
+      }),
+      config.REQUEST_TIMEOUT_MS,
+      "request timeout",
+    );
+    const signedUrl = await signGsUri(imageUri);
+    res.status(200).json({ runId, itemId, imageUri, signedUrl });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("error", "debug_generate_error", { runId, message });
+    res.status(500).json({ error: message, runId });
+  }
 });
 
 app.post("/v1/pool/prewarm", async (req, res) => {

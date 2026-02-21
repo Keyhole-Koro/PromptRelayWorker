@@ -9,9 +9,12 @@ Node.js + TypeScript worker for pre-generating topic images with Vertex AI and s
 
 ## API
 - `GET /healthz` -> `200 ok`
+- `GET /worker` -> visual debug page (image score/generate/pool check)
 - `POST /v1/pool/prewarm`
 - `POST /generate`
 - `POST /v1/topic/generate` (same behavior as `/generate`)
+- `POST /v1/debug/score`
+- `POST /v1/debug/generate`
 - OpenAPI schema: `docs/api-schema.yaml`
 
 ## GCE Setup
@@ -89,3 +92,6 @@ JSON logs include:
 
 ## systemd
 See `deploy/promptrelay-worker.service`.
+
+## Caddy
+Route example is in `deploy/Caddyfile` and exposes `/worker`, `/v1/*`, `/generate`, `/healthz`.

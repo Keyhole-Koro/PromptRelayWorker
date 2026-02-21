@@ -16,6 +16,12 @@ paths:
               schema:
                 type: string
                 example: ok
+  /worker:
+    get:
+      summary: Visual debug page (HTML)
+      responses:
+        '200':
+          description: HTML page
   /v1/pool/prewarm:
     post:
       summary: Pre-generate pool items
@@ -66,6 +72,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GenerateResponse'
+  /v1/debug/score:
+    post:
+      summary: Score an uploaded image with prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DebugScoreRequest'
+      responses:
+        '200':
+          description: Score response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebugScoreResponse'
+  /v1/debug/generate:
+    post:
+      summary: Generate one debug image from prompt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DebugGenerateRequest'
+      responses:
+        '200':
+          description: Debug generated image
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebugGenerateResponse'
 components:
   schemas:
     AspectRatio:
@@ -184,3 +222,35 @@ components:
             sign: { type: number }
           required: [total, gcs, sign]
       required: [topic, itemId, timingsMs]
+    DebugScoreRequest:
+      type: object
+      properties:
+        prompt: { type: string }
+        imageBase64: { type: string }
+        mimeType: { type: string }
+        baseScene: { type: string }
+        subject: { type: string }
+        action: { type: string }
+      required: [prompt, imageBase64, mimeType]
+    DebugScoreResponse:
+      type: object
+      properties:
+        runId: { type: string }
+        prompt: { type: string }
+        genome: { $ref: '#/components/schemas/Genome' }
+        scores: { $ref: '#/components/schemas/ScoreBreakdown' }
+      required: [runId, prompt, genome, scores]
+    DebugGenerateRequest:
+      type: object
+      properties:
+        prompt: { type: string }
+        aspectRatio: { $ref: '#/components/schemas/AspectRatio' }
+      required: [prompt]
+    DebugGenerateResponse:
+      type: object
+      properties:
+        runId: { type: string }
+        itemId: { type: string }
+        imageUri: { type: string }
+        signedUrl: { type: string }
+      required: [runId, itemId, imageUri, signedUrl]

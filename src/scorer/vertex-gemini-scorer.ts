@@ -99,6 +99,53 @@ export async function evaluateWithGemini(params: {
   generation: number;
   candidateIndex: number;
 }): Promise<ScoreBreakdown> {
+  return requestGeminiScore({
+    prompt: params.prompt,
+    genome: params.genome,
+    runId: params.runId,
+    generation: params.generation,
+    candidateIndex: params.candidateIndex,
+    imagePart: {
+      fileData: {
+        mimeType: "image/png",
+        fileUri: params.imageUri,
+      },
+    },
+  });
+}
+
+export async function evaluateWithGeminiInline(params: {
+  imageBase64: string;
+  mimeType: string;
+  prompt: string;
+  genome: Genome;
+  runId: string;
+  generation: number;
+  candidateIndex: number;
+}): Promise<ScoreBreakdown> {
+  return requestGeminiScore({
+    prompt: params.prompt,
+    genome: params.genome,
+    runId: params.runId,
+    generation: params.generation,
+    candidateIndex: params.candidateIndex,
+    imagePart: {
+      inlineData: {
+        mimeType: params.mimeType,
+        data: params.imageBase64,
+      },
+    },
+  });
+}
+
+async function requestGeminiScore(params: {
+  prompt: string;
+  genome: Genome;
+  runId: string;
+  generation: number;
+  candidateIndex: number;
+  imagePart: Record<string, unknown>;
+}): Promise<ScoreBreakdown> {
   const url = `https://aiplatform.googleapis.com/v1/projects/${config.GOOGLE_CLOUD_PROJECT}/locations/global/publishers/google/models/${config.GEMINI_MODEL}:generateContent`;
 
   const body = {
@@ -116,12 +163,7 @@ export async function evaluateWithGemini(params: {
           {
             text: `Genome: ${JSON.stringify(params.genome)}`,
           },
-          {
-            fileData: {
-              mimeType: "image/png",
-              fileUri: params.imageUri,
-            },
-          },
+          params.imagePart,
         ],
       },
     ],
