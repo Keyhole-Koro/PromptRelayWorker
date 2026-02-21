@@ -15,3 +15,8 @@ test("cosine similarity maps to 0..100 score", () => {
   assert.equal(cosineToScore100(cosineSame), 100);
   assert.equal(cosineToScore100(cosineOpposite), 0);
 });
+
+test("cosine similarity validates vector shape", () => {
+  assert.throws(() => cosineSimilarity([], []), /Embedding vectors must be non-empty and same length/);
+  assert.throws(() => cosineSimilarity([1, 2], [1]), /Embedding vectors must be non-empty and same length/);
+});
